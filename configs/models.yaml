@@ -1,0 +1,41 @@
+# Model configuration and compatibility matrix
+models:
+  primary:
+    model_id: "Qwen/Qwen3-VL-2B-Instruct"
+    revision: "main"
+    license: "Apache-2.0"
+    params_total: "2B"
+    architecture: "ViT (Vision Transformer) + Dense Decoder-only LM"
+    native_grounding_format: "bbox_2d"
+    input_resolution_handling: "Dynamic Resolution (native support for variable aspect ratio)"
+    supported_roles: ["inference", "tiling", "lora_sft"]
+    training_backend: "Qwen-VL-Finetune / LlamaFactory"
+    vram_fp16_weights_mb: 4200
+    expected_peak_vram_inference_mb: 6500
+    notes: "主选训练与推理模型，官方提供端到端 LoRA 支持"
+
+  fallback_local:
+    model_id: "Qwen/Qwen2.5-VL-3B-Instruct-AWQ"
+    revision: "main"
+    license: "Apache-2.0"
+    params_total: "3B (AWQ 4-bit)"
+    architecture: "ViT + 4-bit Quantized LM"
+    native_grounding_format: "bbox_2d"
+    supported_roles: ["inference", "tiling"]
+    vram_fp16_weights_mb: 2400
+    expected_peak_vram_inference_mb: 4500
+    notes: "本地 8GB 显存极端紧缺时的纯推理与切片备选方案"
+
+  comparative:
+    model_id: "deepseek-ai/deepseek-vl2-tiny"
+    revision: "main"
+    license: "MIT"
+    params_total: "3B (Activated ~1B, MoE)"
+    architecture: "Hybrid Vision Encoder + MoE Language Model"
+    native_grounding_format: "<|ref|>{label}<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>"
+    coordinate_system: "Normalized [0, 1000]"
+    supported_roles: ["inference", "tiling"]
+    training_backend: "Official DeepSeek-VL2 repo (inference only by default)"
+    vram_fp16_weights_mb: 6000
+    expected_peak_vram_inference_mb: 7500
+    notes: "横向对比模型，使用原生 Grounding 标记解析，不作为首要微调对象"
