@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and virtual environments
+.venv/
+env/
+venv/
+ENV/
+.pytest_cache/
+
+# Local configurations and secrets
+.env
+configs/paths.local.yaml
+
+# Datasets and raw files
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/
+models/
+
+# Outputs, runs, and temporary files
+runs/
+logs/
+*.log
+tmp/
+.cache/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,20 @@
+# Example path configuration for Electronic-Component-Detection-with-Open-Source-VLMs
+# Copy this file to paths.local.yaml and adjust for your local machine or Linux server.
+
+project_root: "C:/workspace/Electronic-Component-Detection-with-Open-Source-VLMs"
+cache_root: "C:/Users/Liu/.codex/cache/tasks/pcb-vlm-antigravity-20261024"
+artifact_root: "C:/Users/Liu/.codex/artifacts/pcb-vlm-antigravity-20261024"
+
+# Sub-paths within CACHE_ROOT
+raw_data_dir: "${cache_root}/datasets/raw"
+processed_data_dir: "${cache_root}/datasets/processed"
+hf_cache_dir: "${cache_root}/hf_cache"
+runs_dir: "${cache_root}/runs"
+tmp_dir: "${cache_root}/tmp"
+
+# Sub-paths within ARTIFACT_ROOT
+stage_reports_dir: "${artifact_root}/stages"
+experiments_dir: "${artifact_root}/experiments"
+models_export_dir: "${artifact_root}/models"
+thesis_data_dir: "${artifact_root}/thesis"
+delivery_dir: "${artifact_root}/delivery"
