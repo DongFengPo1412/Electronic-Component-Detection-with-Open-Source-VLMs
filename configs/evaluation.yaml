@@ -1,0 +1,20 @@
+# Evaluation Configuration for PCB Electronic Component Detection
+iou_thresholds:
+  primary: 0.50
+  strict: 0.75
+
+matching_protocol:
+  name: "greedy_iou_one_to_one"
+  description: "For unranked VLM detections, matches predictions to ground truth greedy by descending IoU within the same category."
+  score_policy: "If score is provided, sort by score descending first; otherwise sort by bounding box area descending."
+
+metrics:
+  calculate_coco_ap: true
+  coco_max_dets: [1, 10, 100, 1000] # Extended to 1000 for dense PCB components
+  report_parse_success_rate: true
+  report_class_support: true
+
+zero_division_behavior:
+  no_gt_no_pred: 1.0
+  no_gt_with_pred: 0.0 # FP present, precision is 0.0
+  with_gt_no_pred: 0.0 # FN present, recall is 0.0
