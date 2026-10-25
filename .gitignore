@@ -29,7 +29,7 @@ datasets/
 *.bin
 *.safetensors
 checkpoints/
-models/
+/models/
 
 # Outputs, runs, and temporary files
 runs/
