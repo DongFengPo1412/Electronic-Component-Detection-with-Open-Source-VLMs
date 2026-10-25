@@ -1,0 +1,78 @@
+# Electronic Component Detection Classes Specification
+# Version: 1.0.0
+# Dataset Source: pcb_wacv_2019 / Georgia Tech & FPIC
+
+categories:
+  - id: 1
+    name: "capacitor"
+    chinese_name: "电容"
+    description: "Surface mount and through-hole capacitors (ceramic, electrolytic, tantalum)"
+    raw_patterns: ["capacitor", "electrolytic capacitor", "tantalum capacitor"]
+
+  - id: 2
+    name: "resistor"
+    chinese_name: "电阻"
+    description: "Chip resistors, axial lead resistors, resistor arrays"
+    raw_patterns: ["resistor", "chip resistor"]
+
+  - id: 3
+    name: "ic"
+    chinese_name: "集成电路芯片"
+    description: "Integrated circuit packages (QFP, BGA, SOIC, DIP, QFN)"
+    raw_patterns: ["ic", "integrated circuit"]
+
+  - id: 4
+    name: "connector"
+    chinese_name: "连接器/接插件"
+    description: "Headers, USB ports, power jacks, terminal blocks"
+    raw_patterns: ["connector", "header", "terminal"]
+
+  - id: 5
+    name: "led"
+    chinese_name: "发光二极管"
+    description: "Light emitting diodes (SMD and indicator LEDs)"
+    raw_patterns: ["led", "light emitting diode"]
+
+  - id: 6
+    name: "transistor"
+    chinese_name: "晶体管/三极管"
+    description: "Bipolar transistors, MOSFETs, SOT packages"
+    raw_patterns: ["transistor", "mosfet"]
+
+  - id: 7
+    name: "diode"
+    chinese_name: "二极管"
+    description: "Rectifier diodes, Schottky diodes, Zener diodes"
+    raw_patterns: ["diode", "schottky", "zener"]
+
+  - id: 8
+    name: "inductor"
+    chinese_name: "电感"
+    description: "Power inductors, chokes, ferrite core coils"
+    raw_patterns: ["inductor", "choke", "coil"]
+
+  - id: 9
+    name: "button"
+    chinese_name: "按键"
+    description: "Tactile push buttons and momentary switches"
+    raw_patterns: ["button", "push button"]
+
+  - id: 10
+    name: "switch"
+    chinese_name: "开关"
+    description: "DIP switches, toggle switches, slide switches"
+    raw_patterns: ["switch", "dip switch", "slide switch"]
+
+  - id: 11
+    name: "clock"
+    chinese_name: "晶振/时钟"
+    description: "Quartz crystal resonators and oscillators"
+    raw_patterns: ["clock", "crystal", "oscillator"]
+
+ignore_patterns:
+  - "text"
+  - "pads"
+  - "pins"
+  - "test"
+  - "jumper"
+  - "unknown"
