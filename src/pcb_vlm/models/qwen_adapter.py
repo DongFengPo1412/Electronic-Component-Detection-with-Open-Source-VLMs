@@ -124,6 +124,21 @@ class QwenAdapter:
                         "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
                         "raw_norm_box": [y1_v, x1_v, y2_v, x2_v]
                     })
+        # 5. Bare box format without label: <|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>
+        if not detected:
+            pattern5 = r"<\|box_start\|>\s*\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)\s*<\|box_end\|>"
+            for ymin_s, xmin_s, ymax_s, xmax_s in re.findall(pattern5, text):
+                ymin, xmin, ymax, xmax = float(ymin_s), float(xmin_s), float(ymax_s), float(xmax_s)
+                x1 = max(0.0, min(float(img_w), (xmin / 1000.0) * img_w))
+                y1 = max(0.0, min(float(img_h), (ymin / 1000.0) * img_h))
+                x2 = max(0.0, min(float(img_w), (xmax / 1000.0) * img_w))
+                y2 = max(0.0, min(float(img_h), (ymax / 1000.0) * img_h))
+                if x2 > x1 and y2 > y1:
+                    detected.append({
+                        "label": "component",
+                        "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                        "raw_norm_box": [ymin, xmin, ymax, xmax]
+                    })
 
         return detected
 
