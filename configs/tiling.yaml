@@ -1,0 +1,27 @@
+# Configuration for Overlapping Tiling and Coordinate Restoration
+tiling:
+  default_tile_size: 1024
+  default_overlap_ratio: 0.20
+  
+  candidate_tile_sizes:
+    - 768
+    - 1024
+
+  candidate_overlap_ratios:
+    - 0.15
+    - 0.20
+    - 0.25
+
+  nms:
+    iou_threshold: 0.50
+    strategy: "per_class_greedy"
+    tie_breaking: "area_descending"
+
+  coordinate_mapping:
+    scale_range: [0, 1000]
+    clip_to_image_boundaries: true
+    margin_tolerance_ratio: 0.05
+
+  edge_filtering:
+    min_visible_area_ratio: 0.10
+    discard_truncated_boundary_ratio: 0.02
