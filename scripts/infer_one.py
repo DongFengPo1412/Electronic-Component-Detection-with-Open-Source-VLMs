@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--output-viz", type=str, default=None, help="Path to save visual preview.")
     parser.add_argument("--cache-dir", type=str, default=None, help="Hugging Face cache directory.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use.")
+    parser.add_argument("--max-pixels", type=int, default=768 * 28 * 28, help="Max pixels for vision encoder.")
     args = parser.parse_args()
 
     if not os.path.exists(args.image):
@@ -74,6 +75,7 @@ def main():
     print(f"Image: {args.image}")
     print(f"Model: {args.model_id}")
     print(f"Device: {args.device}")
+    print(f"Max Pixels: {args.max_pixels}")
 
     adapter = QwenAdapter(
         model_id=args.model_id,
@@ -82,7 +84,7 @@ def main():
     )
 
     print("\nRunning inference...")
-    result = adapter.predict_image(args.image, prompt=args.prompt)
+    result = adapter.predict_image(args.image, prompt=args.prompt, max_pixels=args.max_pixels)
 
     print("\n=== Inference Results ===")
     print(f"  Latency:      {result['latency_ms']:.2f} ms")

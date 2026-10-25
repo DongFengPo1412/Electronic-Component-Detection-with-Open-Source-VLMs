@@ -40,7 +40,8 @@ def run_batch_inference(
     device: str = "cuda",
     tile_size: Optional[int] = None,
     overlap_ratio: float = 0.20,
-    eval_coco_path: Optional[str] = None
+    eval_coco_path: Optional[str] = None,
+    max_pixels: int = 768 * 28 * 28
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     predictions_file = os.path.join(output_dir, "predictions.jsonl")
@@ -109,7 +110,7 @@ def run_batch_inference(
                 temp_tile_path = os.path.join(output_dir, f"_temp_tile_{iid}.jpg")
                 crop_tile.save(temp_tile_path)
 
-                tile_res = adapter.predict_image(temp_tile_path, prompt=prompt)
+                tile_res = adapter.predict_image(temp_tile_path, prompt=prompt, max_pixels=max_pixels)
                 if os.path.exists(temp_tile_path):
                     os.remove(temp_tile_path)
 
@@ -141,7 +142,7 @@ def run_batch_inference(
             }
         else:
             # Whole image inference
-            pred_item_raw = adapter.predict_image(ipath, prompt=prompt)
+            pred_item_raw = adapter.predict_image(ipath, prompt=prompt, max_pixels=max_pixels)
             pred_item = {
                 "cache_key": cache_key,
                 "image_id": iid,
@@ -185,10 +186,16 @@ def run_batch_inference(
 
     # Automated Evaluation if COCO GT is provided
     if eval_coco_path and os.path.exists(eval_coco_path):
-        print(f"\nComputing evaluation metrics against COCO GT...")
+        print(f"\nComputing evaluation metrics against COCO GT for split '{split_name}'...")
         with open(eval_coco_path, "r", encoding="utf-8") as f:
-            coco_gt = json.load(f)
-        eval_metrics = evaluate_detections(coco_gt, {"predictions": results})
+            full_coco = json.load(f)
+        target_id_set = set(target_image_ids)
+        split_coco = {
+            "images": [img for img in full_coco.get("images", []) if img.get("id") in target_id_set or img.get("image_id") in target_id_set],
+            "annotations": [ann for ann in full_coco.get("annotations", []) if ann.get("image_id") in target_id_set],
+            "categories": full_coco.get("categories", [])
+        }
+        eval_metrics = evaluate_detections(split_coco, {"predictions": results})
         eval_out = os.path.join(output_dir, "evaluation_metrics.json")
         with open(eval_out, "w", encoding="utf-8") as f:
             json.dump(eval_metrics, f, indent=2, ensure_ascii=False)
@@ -211,6 +218,7 @@ def main():
     parser.add_argument("--tile-size", type=int, default=None, help="Tile size for patch inference.")
     parser.add_argument("--overlap-ratio", type=float, default=0.20, help="Tile overlap ratio.")
     parser.add_argument("--coco-gt", type=str, default=None, help="Path to coco_annotations.json for evaluation.")
+    parser.add_argument("--max-pixels", type=int, default=768 * 28 * 28, help="Max pixels for vision encoder.")
     args = parser.parse_args()
 
     run_batch_inference(
@@ -224,7 +232,8 @@ def main():
         device=args.device,
         tile_size=args.tile_size,
         overlap_ratio=args.overlap_ratio,
-        eval_coco_path=args.coco_gt
+        eval_coco_path=args.coco_gt,
+        max_pixels=args.max_pixels
     )
 
 
