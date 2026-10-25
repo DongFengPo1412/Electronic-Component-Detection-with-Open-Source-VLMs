@@ -71,6 +71,16 @@ def evaluate_detections(
         img_id = str(item.get("image_id", item.get("id")))
         gt_by_img[img_id] = []
 
+    # Build category ID to name mapping if available
+    cat_id_to_name = {}
+    for c in gt_data.get("categories", []):
+        c_name = str(c.get("name", "")).strip().lower()
+        if "id" in c:
+            cat_id_to_name[c["id"]] = c_name
+            cat_id_to_name[str(c["id"])] = c_name
+        if c_name:
+            cat_id_to_name[c_name] = c_name
+
     for ann in gt_data.get("annotations", []):
         img_id = str(ann.get("image_id"))
         if img_id not in gt_by_img:
@@ -78,8 +88,10 @@ def evaluate_detections(
         box = ann.get("bbox_xyxy")
         if box is None and "bbox" in ann: # COCO xywh format
             box = xywh_to_xyxy(ann["bbox"])
+        raw_cat = ann.get("category_id", ann.get("category"))
+        canonical_cat = cat_id_to_name.get(raw_cat, str(raw_cat).lower())
         gt_by_img[img_id].append({
-            "category": str(ann.get("category_id", ann.get("category"))),
+            "category": canonical_cat,
             "bbox": box
         })
 
@@ -103,8 +115,10 @@ def evaluate_detections(
         for obj in objs:
             box = obj.get("bbox_xyxy", obj.get("bbox"))
             if is_valid_box(box):
+                raw_pred_cat = obj.get("category_id", obj.get("label", obj.get("category")))
+                canonical_pred_cat = cat_id_to_name.get(raw_pred_cat, str(raw_pred_cat).lower())
                 valid_objs.append({
-                    "category": str(obj.get("category_id", obj.get("label", obj.get("category")))),
+                    "category": canonical_pred_cat,
                     "bbox": box,
                     "score": obj.get("score", None)
                 })
