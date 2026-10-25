@@ -48,34 +48,25 @@ class QwenAdapter:
 
     def build_prompt(self, target_classes: Optional[List[str]] = None) -> str:
         if not target_classes:
-            target_classes = ["resistor", "capacitor", "ic", "connector", "led", "transistor", "diode", "inductor", "button"]
+            target_classes = ["ic", "capacitor", "resistor", "connector", "led", "transistor", "diode", "inductor", "button"]
         classes_str = ", ".join(target_classes)
         return (
-            f"Locate and detect all electronic components on this PCB image: {classes_str}. "
-            f"For each detected component, provide its label and bounding box in the format: "
-            f"label <|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>."
+            f"Detect the {classes_str} in this image. "
+            f"Return the bounding box coordinates [ymin, xmin, ymax, xmax] for each detected object."
         )
 
     def parse_grounding_output(self, text: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-        """Parse Qwen2-VL grounding tokens <|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|> to pixel xyxy."""
+        """Parse Qwen2-VL grounding tokens to pixel xyxy."""
         detected = []
 
-        # Standard Qwen format: label <|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>
-        pattern = r"([a-zA-Z_\-]+)\s*<\|box_start\|>\s*\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)\s*<\|box_end\|>"
-        matches = re.findall(pattern, text)
-
-        for label, ymin_s, xmin_s, ymax_s, xmax_s in matches:
-            ymin = float(ymin_s)
-            xmin = float(xmin_s)
-            ymax = float(ymax_s)
-            xmax = float(xmax_s)
-
-            # Convert from [0, 1000] scale to image pixels
+        # 1. Official Qwen2-VL format: <|object_ref_start|>label<|object_ref_end|><|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>
+        pattern1 = r"<\|object_ref_start\|>\s*([^<]+?)\s*<\|object_ref_end\|>\s*<\|box_start\|>\s*\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)\s*<\|box_end\|>"
+        for label, ymin_s, xmin_s, ymax_s, xmax_s in re.findall(pattern1, text):
+            ymin, xmin, ymax, xmax = float(ymin_s), float(xmin_s), float(ymax_s), float(xmax_s)
             x1 = max(0.0, min(float(img_w), (xmin / 1000.0) * img_w))
             y1 = max(0.0, min(float(img_h), (ymin / 1000.0) * img_h))
             x2 = max(0.0, min(float(img_w), (xmax / 1000.0) * img_w))
             y2 = max(0.0, min(float(img_h), (ymax / 1000.0) * img_h))
-
             if x2 > x1 and y2 > y1:
                 detected.append({
                     "label": label.strip().lower(),
@@ -83,24 +74,55 @@ class QwenAdapter:
                     "raw_norm_box": [ymin, xmin, ymax, xmax]
                 })
 
-        # Fallback regex for bracketed formats: label [ymin, xmin, ymax, xmax]
+        # 2. Variant format without object_ref tags: label <|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>
         if not detected:
-            bracket_pattern = r"([a-zA-Z_\-]+)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"
-            for label, c1, c2, c3, c4 in re.findall(bracket_pattern, text):
-                c1, c2, c3, c4 = float(c1), float(c2), float(c3), float(c4)
-                # If values <= 1000, treat as normalized ymin, xmin, ymax, xmax
+            pattern2 = r"([a-zA-Z_\-]+)\s*<\|box_start\|>\s*\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)\s*<\|box_end\|>"
+            for label, ymin_s, xmin_s, ymax_s, xmax_s in re.findall(pattern2, text):
+                ymin, xmin, ymax, xmax = float(ymin_s), float(xmin_s), float(ymax_s), float(xmax_s)
+                x1 = max(0.0, min(float(img_w), (xmin / 1000.0) * img_w))
+                y1 = max(0.0, min(float(img_h), (ymin / 1000.0) * img_h))
+                x2 = max(0.0, min(float(img_w), (xmax / 1000.0) * img_w))
+                y2 = max(0.0, min(float(img_h), (ymax / 1000.0) * img_h))
+                if x2 > x1 and y2 > y1:
+                    detected.append({
+                        "label": label.strip().lower(),
+                        "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                        "raw_norm_box": [ymin, xmin, ymax, xmax]
+                    })
+
+        # 3. Text format: **Label** ... BoundingBox: (c1, c2, c3, c4)
+        if not detected:
+            pattern3 = r"\*\*([a-zA-Z_\-]+)\*\*.*?BoundingBox:\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)"
+            for label, c1_s, c2_s, c3_s, c4_s in re.findall(pattern3, text):
+                c1, c2, c3, c4 = float(c1_s), float(c2_s), float(c3_s), float(c4_s)
                 if max(c1, c2, c3, c4) <= 1000:
                     x1 = (c2 / 1000.0) * img_w
                     y1 = (c1 / 1000.0) * img_h
                     x2 = (c4 / 1000.0) * img_w
                     y2 = (c3 / 1000.0) * img_h
                 else:
-                    x1, y1, x2, y2 = c1, c2, c3, c4
+                    x1, y1, x2, y2 = c2, c1, c4, c3
                 if x2 > x1 and y2 > y1:
                     detected.append({
                         "label": label.strip().lower(),
                         "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
                         "raw_norm_box": [c1, c2, c3, c4]
+                    })
+
+        # 4. JSON format with bbox_2d: [ymin, xmin, ymax, xmax]
+        if not detected and "bbox_2d" in text:
+            json_pattern = r'\{\s*"label":\s*"([^"]+)",\s*"bbox_2d":\s*\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]\s*\}'
+            for label, y1_s, x1_s, y2_s, x2_s in re.findall(json_pattern, text):
+                y1_v, x1_v, y2_v, x2_v = float(y1_s), float(x1_s), float(y2_s), float(x2_s)
+                x1 = (x1_v / 1000.0) * img_w
+                y1 = (y1_v / 1000.0) * img_h
+                x2 = (x2_v / 1000.0) * img_w
+                y2 = (y2_v / 1000.0) * img_h
+                if x2 > x1 and y2 > y1:
+                    detected.append({
+                        "label": label.strip().lower(),
+                        "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                        "raw_norm_box": [y1_v, x1_v, y2_v, x2_v]
                     })
 
         return detected
