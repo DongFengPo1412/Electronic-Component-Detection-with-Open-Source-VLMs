@@ -1,0 +1,59 @@
+version: 1.0-frozen
+task: electronic_component_detection
+categories:
+- button
+- capacitor
+- clock
+- connector
+- diode
+- ic
+- inductor
+- led
+- resistor
+- switch
+- transistor
+prompt: Detect the button, capacitor, clock, connector, diode, ic, inductor, led,
+  resistor, switch, transistor in this image. Return the bounding box coordinates
+  [ymin, xmin, ymax, xmax] for each detected object.
+generation:
+  do_sample: false
+  max_new_tokens: 1024
+  torch_dtype: bfloat16
+  device: cuda
+tiling:
+  tile_size: 1024
+  overlap_ratio: 0.2
+  nms_iou_threshold: 0.5
+evaluation:
+  iou_thresholds:
+  - 0.5
+  - 0.25
+  - 0.1
+  metrics:
+  - precision
+  - recall
+  - f1
+  - support
+  - latency_ms
+  - peak_vram_mb
+models:
+  qwen_base: C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master
+  qwen_lora: C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage14_lora_training\best_adapter
+test_split:
+  image_ids:
+  - 10
+  - 11
+  - 19
+  - 27
+  - 40
+  - 41
+  - 42
+  - 43
+  boards:
+  - DuetWIFI
+  - ML450_Top1
+  - STK644
+  - XCM-307A
+  - XLVDSproSupply
+  total_images: 8
+final_protocol_hash: 872e3c796403243306c995316733d8fb98f9469abaee0d062f6de00575316dec
