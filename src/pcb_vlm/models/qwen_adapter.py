@@ -46,6 +46,10 @@ class QwenAdapter:
         load_time = time.time() - t0
         print(f"Qwen2-VL successfully loaded in {load_time:.2f}s.")
 
+    def load_model(self):
+        """No-op if already loaded in __init__."""
+        pass
+
     def build_prompt(self, target_classes: Optional[List[str]] = None) -> str:
         if not target_classes:
             target_classes = ["ic", "capacitor", "resistor", "connector", "led", "transistor", "diode", "inductor", "button"]
@@ -139,8 +143,47 @@ class QwenAdapter:
                         "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
                         "raw_norm_box": [ymin, xmin, ymax, xmax]
                     })
+        # Post-filter: geometric validity and anti-repetition deduplication
+        filtered_detected = []
+        seen_boxes = []
+        for d in detected:
+            x1, y1, x2, y2 = d["bbox_xyxy"]
+            w = x2 - x1
+            h = y2 - y1
+            lbl = d["label"]
+            # 1. Skip degenerate tiny boxes or full-tile hallucinations
+            if w <= 3 or h <= 3:
+                continue
+            if w >= 0.92 * img_w and h >= 0.92 * img_h:
+                continue
+            # 2. Skip non-physical aspect ratio ribbons for chip components
+            if lbl in ["resistor", "capacitor", "diode", "led", "inductor"]:
+                aspect = w / (h + 1e-6)
+                if aspect > 4.5 or aspect < 0.22:
+                    continue
+                if w > 0.5 * img_w and h > 0.5 * img_h:
+                    continue
 
-        return detected
+            # 3. Suppress near-identical duplicate boxes (IoU > 0.85 within same image)
+            is_dup = False
+            for s in seen_boxes:
+                if s["label"] == lbl:
+                    sx1, sy1, sx2, sy2 = s["bbox_xyxy"]
+                    ix1 = max(x1, sx1)
+                    iy1 = max(y1, sy1)
+                    ix2 = min(x2, sx2)
+                    iy2 = min(y2, sy2)
+                    if ix2 > ix1 and iy2 > iy1:
+                        inter = (ix2 - ix1) * (iy2 - iy1)
+                        union = w * h + (sx2 - sx1) * (sy2 - sy1) - inter
+                        if union > 0 and (inter / union) > 0.85:
+                            is_dup = True
+                            break
+            if not is_dup:
+                seen_boxes.append(d)
+                filtered_detected.append(d)
+
+        return filtered_detected
 
     def predict_image(
         self,
@@ -187,7 +230,8 @@ class QwenAdapter:
             generated_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False
+                do_sample=False,
+                repetition_penalty=1.25
             )
 
         if torch.cuda.is_available():

@@ -11,7 +11,7 @@ import torch
 class DeepSeekAdapter:
     def __init__(
         self,
-        model_id: str = "deepseek-ai/deepseek-vl2-tiny",
+        model_id: str = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
         device: str = "cuda",
         torch_dtype = torch.bfloat16,
         cache_dir: Optional[str] = None
@@ -24,45 +24,36 @@ class DeepSeekAdapter:
         self.processor = None
 
     def load_model(self):
-        """Lazy load DeepSeek-VL2 weights to prevent VRAM collision with Qwen."""
+        """Lazy load DeepSeek-VL weights to prevent VRAM collision with Qwen."""
         if self.model is not None:
             return
 
+        default_cached = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master"
         if os.path.exists(self.model_id):
             model_path = self.model_id
+        elif os.path.exists(default_cached):
+            model_path = default_cached
         else:
             print(f"Resolving model {self.model_id} via ModelScope...")
             from modelscope import snapshot_download
             model_path = snapshot_download(self.model_id, cache_dir=self.cache_dir)
             print(f"DeepSeek model path resolved: {model_path}")
 
-        print(f"Loading DeepSeek-VL2 from {model_path} on {self.device}...")
+        print(f"Loading DeepSeek-VL from {model_path} on {self.device}...")
         t0 = time.time()
-        from transformers import AutoModelForCausalLM
-        try:
-            from deepseek_vl2.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
-            self.model = DeepseekVLV2ForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=self.torch_dtype,
-                device_map=self.device if self.device == "cuda" else None
-            )
-            self.processor = DeepseekVLV2Processor.from_pretrained(model_path)
-        except ImportError:
-            # Fallback to standard transformers with trust_remote_code
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=self.torch_dtype,
-                trust_remote_code=True,
-                device_map=self.device if self.device == "cuda" else None
-            )
-            from transformers import AutoProcessor
-            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        from deepseek_vl.models import VLChatProcessor, MultiModalityCausalLM
+        self.processor = VLChatProcessor.from_pretrained(model_path)
+        self.model = MultiModalityCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=self.torch_dtype,
+            device_map=self.device if self.device == "cuda" else None
+        )
 
         if self.device != "cuda" and hasattr(self.model, "to"):
             self.model.to(self.device)
 
         load_time = time.time() - t0
-        print(f"DeepSeek-VL2 successfully loaded in {load_time:.2f}s.")
+        print(f"DeepSeek-VL successfully loaded in {load_time:.2f}s.")
 
     def build_prompt(self, target_classes: Optional[List[str]] = None) -> str:
         if not target_classes:
@@ -112,8 +103,26 @@ class DeepSeekAdapter:
                         "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
                         "raw_norm_box": [c1, c2, c3, c4]
                     })
+        # Geometric validity and anti-repetition filter
+        filtered_detected = []
+        for d in detected:
+            x1, y1, x2, y2 = d["bbox_xyxy"]
+            w = x2 - x1
+            h = y2 - y1
+            lbl = d["label"]
+            if w <= 3 or h <= 3:
+                continue
+            if w >= 0.92 * img_w and h >= 0.92 * img_h:
+                continue
+            if lbl in ["resistor", "capacitor", "diode", "led", "inductor"]:
+                aspect = w / (h + 1e-6)
+                if aspect > 4.5 or aspect < 0.22:
+                    continue
+                if w > 0.5 * img_w and h > 0.5 * img_h:
+                    continue
+            filtered_detected.append(d)
 
-        return detected
+        return filtered_detected
 
     def predict_image(
         self,
@@ -134,26 +143,26 @@ class DeepSeekAdapter:
             torch.cuda.synchronize()
 
         t0 = time.time()
-        # Conversation input for DeepSeek-VL2
+        # Conversation input for DeepSeek-VL
         conversation = [
             {
-                "role": "<|User|>",
-                "content": f"<image>\n{prompt}",
+                "role": "User",
+                "content": f"<image_placeholder>{prompt}",
                 "images": [pil_img]
             },
-            {"role": "<|Assistant|>", "content": ""}
+            {"role": "Assistant", "content": ""}
         ]
 
         prepare_inputs = self.processor(
             conversations=conversation,
             images=[pil_img],
-            force_batchify=True,
-            system_prompt=""
+            force_batchify=True
         ).to(self.model.device)
 
         with torch.no_grad():
             inputs_embeds = self.model.prepare_inputs_embeds(**prepare_inputs)
-            outputs = self.model.generate(
+            gen_model = getattr(self.model, "language_model", self.model)
+            outputs = gen_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=prepare_inputs.attention_mask,
                 pad_token_id=self.processor.tokenizer.pad_token_id,
@@ -161,6 +170,7 @@ class DeepSeekAdapter:
                 eos_token_id=self.processor.tokenizer.eos_token_id,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
+                repetition_penalty=1.25,
                 use_cache=True
             )
 

@@ -140,9 +140,10 @@ def main():
     parser.add_argument("--val-data-file", type=str, default=None, help="Path to val_sft.json for evaluation.")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to save checkpoints.")
     parser.add_argument("--config", type=str, default="configs/lora.yaml", help="Path to lora.yaml.")
-    parser.add_argument("--max-steps", type=int, default=20, help="Max training steps.")
-    parser.add_argument("--eval-steps", type=int, default=20, help="Evaluation interval.")
+    parser.add_argument("--max-steps", type=int, default=200, help="Max training steps.")
+    parser.add_argument("--eval-steps", type=int, default=25, help="Evaluation interval.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--use-qlora", action="store_true", help="Use 4-bit BitsAndBytes QLoRA to save VRAM.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -159,14 +160,32 @@ def main():
     print(f"Max Steps:     {args.max_steps}")
     print(f"Eval Steps:    {args.eval_steps}")
     print(f"Device:        {args.device}")
+    print(f"Use QLoRA 4bit: {args.use_qlora}")
 
     # Load Base Model
     print("\nLoading base model and processor...")
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.bfloat16,
-        device_map=args.device if args.device == "cuda" else None
-    )
+    if args.use_qlora:
+        from transformers import BitsAndBytesConfig
+        from peft import prepare_model_for_kbit_training
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            args.model_path,
+            quantization_config=bnb_cfg,
+            device_map="auto"
+        )
+        model = prepare_model_for_kbit_training(model)
+        print("Loaded Qwen2-VL with 4-bit NormalFloat4 (QLoRA).")
+    else:
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            args.model_path,
+            torch_dtype=torch.bfloat16,
+            device_map=args.device if args.device == "cuda" else None
+        )
     processor = AutoProcessor.from_pretrained(args.model_path)
 
     # Enable Gradient Checkpointing
@@ -326,24 +345,24 @@ def main():
                     mean_val_loss = val_loss_acc / max(1, val_batches)
                     model.train()
                     record["val_loss"] = round(mean_val_loss, 4)
-                    print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Val Loss: {mean_val_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB")
+                    print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Val Loss: {mean_val_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB", flush=True)
 
                     if mean_val_loss < best_val_loss:
                         best_val_loss = mean_val_loss
                         best_dir = os.path.join(args.output_dir, "best_adapter")
                         model.save_pretrained(best_dir)
                         processor.save_pretrained(best_dir)
-                        print(f"*** New best LoRA adapter saved with Val Loss {mean_val_loss:.4f} -> {best_dir} ***")
+                        print(f"*** New best LoRA adapter saved with Val Loss {mean_val_loss:.4f} -> {best_dir} ***", flush=True)
                 else:
-                    print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB | Elapsed: {record['time_elapsed_s']}s")
+                    print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB | Elapsed: {record['time_elapsed_s']}s", flush=True)
 
                 history.append(record)
 
-                if step % cfg["training"].get("save_steps", 20) == 0 or step >= args.max_steps:
+                if step % cfg["training"].get("save_steps", 10) == 0 or step >= args.max_steps:
                     save_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
                     model.save_pretrained(save_dir)
                     processor.save_pretrained(save_dir)
-                    print(f"Saved LoRA checkpoint to {save_dir}")
+                    print(f"Saved LoRA checkpoint to {save_dir}", flush=True)
 
                 if step >= args.max_steps:
                     break

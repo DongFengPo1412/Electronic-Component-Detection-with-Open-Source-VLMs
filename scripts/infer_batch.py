@@ -12,6 +12,7 @@ import torch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from pcb_vlm.models.qwen_adapter import QwenAdapter
+from pcb_vlm.models.deepseek_adapter import DeepSeekAdapter
 from pcb_vlm.geometry.tiling import generate_tiles, map_tile_box_to_global, nms_merge_predictions
 from evaluate import evaluate_detections
 
@@ -43,7 +44,8 @@ def run_batch_inference(
     overlap_ratio: float = 0.20,
     eval_coco_path: Optional[str] = None,
     max_pixels: int = 768 * 28 * 28,
-    adapter_dir: Optional[str] = None
+    adapter_dir: Optional[str] = None,
+    model_family: str = "qwen"
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     predictions_file = os.path.join(output_dir, "predictions.jsonl")
@@ -70,19 +72,32 @@ def run_batch_inference(
         print(f"Loaded {len(cached_predictions)} cached predictions from {predictions_file}.")
 
     # Load model adapter
-    adapter = QwenAdapter(
-        model_id=model_id,
-        device=device,
-        cache_dir=cache_dir
-    )
-
-    # Mount LoRA adapter if provided
-    if adapter_dir and os.path.exists(adapter_dir):
-        print(f"Loading LoRA adapter from {adapter_dir}...")
-        from peft import PeftModel
-        adapter.model = PeftModel.from_pretrained(adapter.model, adapter_dir)
-        adapter.model.eval()
-        print("LoRA adapter successfully mounted.")
+    if model_family.lower() == "deepseek":
+        adapter = DeepSeekAdapter(
+            model_id=model_id,
+            device=device,
+            cache_dir=cache_dir
+        )
+        adapter.load_model()
+        if adapter_dir and os.path.exists(adapter_dir):
+            print(f"Loading LoRA adapter for DeepSeek from {adapter_dir}...")
+            from peft import PeftModel
+            adapter.model.language_model = PeftModel.from_pretrained(adapter.model.language_model, adapter_dir)
+            adapter.model.eval()
+            print("DeepSeek LoRA adapter successfully mounted.")
+    else:
+        adapter = QwenAdapter(
+            model_id=model_id,
+            device=device,
+            cache_dir=cache_dir
+        )
+        # Mount LoRA adapter if provided
+        if adapter_dir and os.path.exists(adapter_dir):
+            print(f"Loading LoRA adapter from {adapter_dir}...")
+            from peft import PeftModel
+            adapter.model = PeftModel.from_pretrained(adapter.model, adapter_dir)
+            adapter.model.eval()
+            print("LoRA adapter successfully mounted.")
 
     prompt = adapter.build_prompt()
 
@@ -231,6 +246,7 @@ def main():
     parser.add_argument("--overlap-ratio", type=float, default=0.20, help="Tile overlap ratio.")
     parser.add_argument("--coco-gt", type=str, default=None, help="Path to coco_annotations.json for evaluation.")
     parser.add_argument("--max-pixels", type=int, default=768 * 28 * 28, help="Max pixels for vision encoder.")
+    parser.add_argument("--model-family", type=str, default="qwen", choices=["qwen", "deepseek"], help="Model family to run.")
     args = parser.parse_args()
 
     run_batch_inference(
@@ -246,7 +262,8 @@ def main():
         overlap_ratio=args.overlap_ratio,
         eval_coco_path=args.coco_gt,
         max_pixels=args.max_pixels,
-        adapter_dir=args.adapter_dir
+        adapter_dir=args.adapter_dir,
+        model_family=args.model_family
     )
 
 

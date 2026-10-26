@@ -183,9 +183,32 @@ def process_split_sft(
                         {"from": "user", "value": prompt},
                         {"from": "assistant", "value": build_qwen_grounding_target(tile_objs, tile_w, tile_h)}
                     ],
-                    "num_objects": len(tile_objs)
+                    "num_objects": len(tile_objs),
+                    "is_negative": False
                 })
                 total_components_included += len(tile_objs)
+            else:
+                # Hard Negative Mining: sample 1 in 3 empty tiles (pure substrate, pin rows, copper traces)
+                if t_idx % 3 == 0:
+                    crop_fname = f"{split_name}_{iid}_tile_neg_{t_idx:03d}.jpg"
+                    crop_path = os.path.join(crops_dir, crop_fname)
+                    crop_img = pil_img.crop((tx1, ty1, tx2, ty2))
+                    crop_img.save(crop_path, quality=95)
+
+                    sft_records.append({
+                        "id": f"{split_name}_tile_neg_{iid}_{t_idx:03d}",
+                        "image": os.path.abspath(crop_path),
+                        "width": tile_w,
+                        "height": tile_h,
+                        "board_folder": folder,
+                        "tile_offset": [tx1, ty1],
+                        "conversations": [
+                            {"from": "user", "value": prompt},
+                            {"from": "assistant", "value": "None"}
+                        ],
+                        "num_objects": 0,
+                        "is_negative": True
+                    })
 
     return sft_records
 

@@ -1,0 +1,36 @@
+# LoRA V2 Supervised Fine-Tuning (SFT) configuration for Qwen2-VL-2B (Iteration 2)
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 1.5e-4
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  weight_decay: 0.01
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  logging_steps: 2
+  save_strategy: "steps"
+  save_steps: 10
+  save_total_limit: 2
+  optim: "adamw_torch"
+
+data:
+  max_length: 2048
+  image_max_pixels: 301056 # 384 * 28 * 28 (Optimal for 8GB RTX 4060, prevents PCIe memory paging)
