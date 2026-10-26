@@ -21,10 +21,11 @@ def compute_prediction_cache_key(
     model_id: str,
     prompt: str,
     tile_size: Optional[int],
-    overlap: Optional[float]
+    overlap: Optional[float],
+    adapter_dir: Optional[str] = None
 ) -> str:
     hasher = hashlib.sha256()
-    content = f"{image_sha256}_{model_id}_{prompt}_{tile_size}_{overlap}"
+    content = f"{image_sha256}_{model_id}_{prompt}_{tile_size}_{overlap}_{adapter_dir}"
     hasher.update(content.encode("utf-8"))
     return hasher.hexdigest()
 
@@ -41,7 +42,8 @@ def run_batch_inference(
     tile_size: Optional[int] = None,
     overlap_ratio: float = 0.20,
     eval_coco_path: Optional[str] = None,
-    max_pixels: int = 768 * 28 * 28
+    max_pixels: int = 768 * 28 * 28,
+    adapter_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     predictions_file = os.path.join(output_dir, "predictions.jsonl")
@@ -73,6 +75,15 @@ def run_batch_inference(
         device=device,
         cache_dir=cache_dir
     )
+
+    # Mount LoRA adapter if provided
+    if adapter_dir and os.path.exists(adapter_dir):
+        print(f"Loading LoRA adapter from {adapter_dir}...")
+        from peft import PeftModel
+        adapter.model = PeftModel.from_pretrained(adapter.model, adapter_dir)
+        adapter.model.eval()
+        print("LoRA adapter successfully mounted.")
+
     prompt = adapter.build_prompt()
 
     results = []
@@ -86,7 +97,7 @@ def run_batch_inference(
         w = img_entry["width"]
         h = img_entry["height"]
 
-        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio)
+        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio, adapter_dir)
 
         if cache_key in cached_predictions:
             print(f"[{idx+1}/{len(target_images)}] Image {iid} ({img_entry['folder']}): CACHED")
@@ -164,11 +175,11 @@ def run_batch_inference(
         with open(predictions_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(pred_item, ensure_ascii=False) + "\n")
 
-    # Run Manifest
     manifest_record = {
         "run_id": run_id,
         "split_name": split_name,
         "model_id": model_id,
+        "adapter_dir": adapter_dir,
         "tile_size": tile_size,
         "overlap_ratio": overlap_ratio,
         "total_images": len(target_images),
@@ -211,6 +222,7 @@ def main():
     parser.add_argument("--splits", type=str, required=True, help="Path to splits.json.")
     parser.add_argument("--split-name", type=str, default="val", help="Split name to run (val, test, train).")
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2-VL-2B-Instruct", help="Model ID.")
+    parser.add_argument("--adapter-dir", type=str, default=None, help="Path to fine-tuned LoRA adapter.")
     parser.add_argument("--output-dir", type=str, required=True, help="Output directory for predictions.")
     parser.add_argument("--run-id", type=str, required=True, help="Unique run identifier.")
     parser.add_argument("--cache-dir", type=str, default=None, help="Model cache directory.")
@@ -233,7 +245,8 @@ def main():
         tile_size=args.tile_size,
         overlap_ratio=args.overlap_ratio,
         eval_coco_path=args.coco_gt,
-        max_pixels=args.max_pixels
+        max_pixels=args.max_pixels,
+        adapter_dir=args.adapter_dir
     )
 
 
