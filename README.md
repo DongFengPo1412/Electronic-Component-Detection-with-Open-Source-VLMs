@@ -1,20 +1,27 @@
-# 基于开源视觉语言大模型的电子元器件检测系统 (PCB Component Detection with Open-Source VLMs)
+# 基于开源视觉语言大模型的电子元器件检测实证研究 (Empirical Study on PCB Component Detection with Open-Source VLMs)
 
 > **本科毕业设计全流程工程与复现包**  
 > 课题题目：基于开源视觉语言大模型的电子元器件检测  
-> 核心方案：**Qwen2-VL-2B-Instruct + LoRA 参数高效微调 + 1024×1024 物理切片几何重构 (SAHI)**
+> 核心探索：**轻量多模态 VLM (Qwen2-VL-2B / DeepSeek-VL-1.3B) 在密集电子元器件检测中的定位能力边界、消融实验与失效机理分析**
 
 ---
 
-## 📖 项目概述
+## 📖 项目概述与实证结论
 
-针对工业印制电路板（PCB）高分辨率（通常为 3000×2000 像素以上）与表面贴装元器件（SMT 0402/0603 阻容、贴片芯片等）物理尺度微小、排布密集的特点，传统多模态视觉语言大模型（VLM）直接输入整图时由于强行双线性下采样会产生严重的**特征湮灭效应**，导致零样本召回率近乎为 0。
+针对工业印制电路板（PCB）高分辨率（通常为 3000×2000 像素以上）与表面贴装元器件（SMT 0402/0603 阻容、贴片芯片等）物理尺度微小、排布密集的特点，通用多模态视觉语言大模型（VLM）在整图输入与微调检测中面临严峻挑战。
 
-本项目基于消费级单卡硬件（NVIDIA RTX 4060 Laptop 8GB）构建了一套完整、严谨、物理隔离无泄漏的电子元器件检测闭环体系：
-1. **多模态物理切片重构（High-Res Tiling）**：采用 $1024 \times 1024$ 重叠步长切片保持 1:1 原生物理分辨率，将模型输入视野与贴片细节像素完美匹配，并通过全局坐标逆变换与非极大值抑制（NMS）在整板空间完成融合；
-2. **LoRA 参数高效监督微调（SFT）**：在冻结视觉编码器（ViT）与多模态投影层的前提下，对语言模型核心注意力与前馈投影层注入秩 $r=16$ 的低秩矩阵，解决通用模型缺乏电子元器件专业拓扑与分类先验的痛点；
-3. **8GB 显存极限工程优化**：采用 `bfloat16` 混合精度与梯度检查点（Gradient Checkpointing），全程峰值显存控制在 **7.83 GB** 以内，彻底消除 CUDA OOM 风险；
-4. **终局评测指标跃升**：在完全未见的 5 块独立测试 PCB 板（860 个真值元器件）上，主推方案 Q3 真正例相比预训练整图基线取得 **37 倍飞跃**，微观召回率实现 **35 倍提升**。
+本项目在单卡消费级硬件（NVIDIA RTX 4060 Laptop 8GB）上构建了一套可复现、严格板级隔离的开源 VLM 检测与微调评测平台，主要研究结论如下：
+
+1. **轻量 VLM 检测能力边界明确**：
+   - **DeepSeek-VL-1.3B-chat** 定位为通用视觉语言对话基座，生成自然语言描述，无原生定位标记输出，在数值坐标检测评测中检出框为 0；
+   - **Qwen2-VL-2B-Instruct** 在整图缩放输入下，由于微小器件在下采样后分辨率急剧丢失（低于 Patch 分辨率极限），基础模型与微调模型检出率均极低（标准 IoU≥0.50 下 TP=0）。
+2. **分块（Tiling）与微调的收益与失效机理**：
+   - 引入高分辨率分块切片后，候选生成框数量显著增加（从数十个增至千余个）；
+   - 但在标准检测指标（IoU≥0.50）下，LoRA 微调（Q3）仅取得 1 个真正例（TP），低于基础模型分块（Q1）的 2 个 TP，微调尚未形成稳定正收益；
+   - 早期实验所观察到的“低门槛（IoU≥0.10）TP 增长”（从 1 个增至 37 个），伴随产生超过 1,600 个沿 PCB 铜线走线分布的阶梯状虚警框（Ladder Hallucination），本质属于语言模型自回归重复生成的结构性失效，不代表工业高精度定位能力。
+3. **数据集与板级隔离规范**：
+   - 实验采用 **Georgia Tech RIPL WACV 2019 PCB 数据集**（共 47 张高分辨率图像，对应 29 块独立物理板），选取 9 类主要元器件；该数据集需与 FICS-PCB / FPIC（显微镜/DSLR 子集）严格区分；
+   - 建立了经人工复核的物理板映射规范（`configs/board_canonical_map.json`），将多视图（如 `ML450_Top1/Top2/Bottom1/Bottom2`、`XLVDSproSupply`）统一归入单一物理板，彻底杜绝板级跨集合泄漏。
 
 ---
 
@@ -39,30 +46,23 @@
 
 ## 🚀 核心工作流与复现命令指南
 
-全流程代码结构遵循工业化最佳实践，各阶段命令均支持断点续跑与可追溯哈希校验：
-
-### 1. 标注转换与数据审计（阶段 04）
-将原始 RIPL WACV 2019 PCB 数据集标注解析并统一转换为国际标准 COCO GT 格式，执行坐标合法性与越界清零审计：
+### 1. 规范化物理板映射与标注转换
+使用规范物理板映射表转换并切分数据集：
 ```powershell
 python scripts/convert_annotations.py
-python scripts/audit_dataset.py
-```
-
-### 2. 严格物理 PCB 划分（阶段 05）
-按物理电路板唯一编号执行物理隔离划分（22 块训练板、5 块验证板、5 块测试板，杜绝任何数据泄露）：
-```powershell
-python scripts/make_splits.py
+python scripts/make_splits.py --seed 42
 python scripts/validate_splits.py
 ```
 
-### 3. 多模态 SFT 微调样本构造（阶段 12）
-生成兼顾整图全局拓扑与 1024×1024 高精局部切片的 Qwen2-VL 原生定位样本，按空间几何位置自上而下、自左向右排序消除自回归歧义：
+### 2. 坐标与模型协议审计
+验证非正方形图像坐标轴映射及模型定位协议：
 ```powershell
-python scripts/build_sft_data.py
+python scripts/verify_coordinate_protocol.py
+python -m unittest tests/test_qwen_adapter.py
 ```
 
-### 4. LoRA 正式微调训练（阶段 14）
-在训练集 318 个高精切片样本上执行 1 个完整 Epoch（80 优化器步）的微调，动态监测验证损失并自动锁定保存 `best_adapter`：
+### 3. 多模态 LoRA 微调与全量验证评估
+支持全验证集损失评估与优化器断点状态保存：
 ```powershell
 python scripts/train_lora.py `
   --model-path "C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master" `
@@ -74,36 +74,38 @@ python scripts/train_lora.py `
   --eval-steps 20
 ```
 
-### 5. 独立测试集全矩阵评测（阶段 16）
-在锁定的 5 块测试板上自动化一键运行 Q0（Base+整图）、Q1（Base+分块）、Q2（LoRA+整图）、Q3（LoRA+分块）全套测试并生成对比报告：
+### 4. 标准多阈值检测评测
+主报标准检测指标（IoU 0.50, 0.75, AP@[.50:.95]），辅助诊断指标严格标记：
 ```powershell
-python scripts/run_test_matrix.py
+python scripts/evaluate.py `
+  --gt "C:/Users/Liu/.codex/cache/tasks/pcb-vlm-antigravity-20261024/annotations/coco_annotations.json" `
+  --pred "C:/Users/Liu/.codex/cache/tasks/pcb-vlm-antigravity-20261024/runs/stage16_final_test_matrix/Q3_qwen_lora_tiling/predictions.jsonl" `
+  --benchmark
 ```
 
-### 6. 交互式 Web 演示系统启动（阶段 18）
-启动本地暗黑拟态可视化 Web 应用程序，支持拖拽自定义 PCB 图像检测与一键查看多尺度元器件检测框：
+### 5. 交互式真实回放演示系统
+启动本地 Web 应用程序，严格按磁盘真实推理文件回放，不造假、不填充伪造框：
 ```powershell
 python scripts/demo_app.py
 ```
-启动后在浏览器访问：`http://127.0.0.1:7860`
+访问：`http://127.0.0.1:7860`
 
 ---
 
-## 📊 核心实验与消融结果速查
+## 📊 实验实测结果对比（测试集 8 张图像，860 个 Ground Truth 元器件）
 
-在 5 块独立测试 PCB 板（8 张图像，860 个 Ground Truth 元器件）上的权威测试对比：
-
-| 实验代号 | 架构与算法方案 | 输入分辨率模式 | 检出候选数 | TP (IoU=0.25) | TP (IoU=0.10) | Micro R (0.10) | Micro F1 (0.10) | 单图耗时 (s) | 峰值显存 (MB) |
+| 方案代号 | 模型架构与配置 | 输入形式 | 预测框总数 | 标准 TP (IoU≥0.50) | 标准 Precision (0.50) | 标准 Recall (0.50) | 诊断 TP (IoU≥0.10) | 诊断 Precision (0.10) | 单图耗时 |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Q0** | Qwen2-VL (Base) | 整图缩放 (Whole) | 46 | 0 | 1 | 0.12% | 0.22% | 18.5s | 6,198.5 |
-| **Q1** | Qwen2-VL (Base) | $1024 \times 1024$ 重叠分块 | 537 | 4 | 16 | 1.86% | 2.29% | 250.8s | 6,065.6 |
-| **Q2** | Qwen2-VL (LoRA) | 整图缩放 (Whole) | 84 | 0 | 2 | 0.23% | 0.42% | 105.1s | 6,268.9 |
-| **Q3** | **Qwen2-VL (LoRA)** | **$1024 \times 1024$ 重叠分块** | **1,719** | **8** | **37** | **4.30%** | **2.87%** | **961.1s** | **6,136.0** |
+| **Q0** | Qwen2-VL-2B (Base) | 整图缩放 (Whole) | 46 | **0** | 0.00% | 0.00% | 1 | 2.17% | ~18s |
+| **Q1** | Qwen2-VL-2B (Base) | 1024 分块 (Tiling) | 537 | **2** | 0.37% | 0.23% | 16 | 2.98% | ~251s |
+| **Q2** | Qwen2-VL-2B (LoRA) | 整图缩放 (Whole) | 84 | **0** | 0.00% | 0.00% | 2 | 2.38% | ~105s |
+| **Q3** | Qwen2-VL-2B (LoRA) | 1024 分块 (Tiling) | 1,719 | **1** | 0.06% | 0.12% | 37 | 2.15% | ~961s |
+| **DS** | DeepSeek-VL-1.3B | 对话描述 (Whole) | 0 | **0** | 0.00% | 0.00% | 0 | 0.00% | ~7s |
 
-> **关键学术结论**：
-> 1. 分块切片将检测候选数提升 **10.6 倍**，解决了超大图像下采样造成的特征湮灭；
-> 2. LoRA 监督微调赋予大模型电子元器件专业感知能力，将真实匹配正例（TP）推高至 **37 个**，微观召回率实现 **35 倍飞跃**；
-> 3. 在接插件（Connector，F1=12.15%）与按键（Button，F1=13.33%）等典型工业器件上展现出高精度实用定位能力。
+> **实验客观诊断分析**：
+> 1. **标准评价结论**：在目标检测通行评价标准（IoU≥0.50 / 0.75）下，当前轻量 VLM 无法稳定解决密集微小元器件的精确定位；微调方案 Q3 的标准匹配数（1 个）并未优于基础模型 Q1（2 个）；
+> 2. **宽松门槛归因**：IoU≥0.10 下所谓 37 个 TP 伴随 1,682 个误报，且误报框呈现沿 PCB 铜线走线的连续阶梯状排列，属于自回归语言生成的幻觉与漂移；
+> 3. **算力与工程意义**：8GB 显卡下单图分块耗时约 16 分钟，工业落地需要结合专用检测先验（如轻量级局部特征注入或两阶段级联架构），而非单纯依靠通用自回归 VLM 端到端输出坐标。
 
 ---
 
@@ -112,33 +114,36 @@ python scripts/demo_app.py
 ```tree
 Electronic-Component-Detection-with-Open-Source-VLMs/
 ├── configs/
-│   ├── models.yaml            # 模型元数据与基线兼容矩阵配置
-│   ├── lora.yaml              # LoRA 架构超参数与显存优化配置
-│   ├── tiling.yaml            # 1024 物理切片步长与重叠比例配置
-│   └── frozen_protocol.yaml   # 阶段 15 最终哈希锁定的正式实验协议
+│   ├── board_canonical_map.json # 29 块物理板规范映射字典（杜绝多视角泄漏）
+│   ├── models.yaml              # 模型基座与配置定义
+│   ├── lora.yaml                # LoRA 结构超参数与显存优化配置
+│   └── tiling.yaml              # 1024 物理切片步长与重叠比例配置
 ├── scripts/
-│   ├── convert_annotations.py # 标注格式清洗与转换
-│   ├── audit_dataset.py       # COCO GT 合法性与越界审计
-│   ├── make_splits.py         # 物理 PCB 板隔离划分
-│   ├── build_sft_data.py      # Qwen 原生 SFT 样本构造
-│   ├── train_lora.py          # LoRA 正式微调与验证监控
-│   ├── infer_batch.py         # 批量多尺度带缓存推理
-│   ├── run_test_matrix.py     # 终局全矩阵测试自动化运行器
-│   ├── error_analysis.py      # 误差归因与尺度消融分析
-│   └── demo_app.py            # 本地交互式 Web 演示系统
+│   ├── convert_annotations.py   # 规范物理板映射与标注转换
+│   ├── make_splits.py           # 物理 PCB 板级隔离划分
+│   ├── validate_splits.py       # 严格物理跨集重叠与图片隔离校验
+│   ├── verify_coordinate_protocol.py # 坐标轴与模型格式协议验证
+│   ├── train_lora.py            # LoRA 微调训练与全量验证监控
+│   ├── infer_batch.py           # 批量推理（含哈希缓存、原始文本保存与耗时纠正）
+│   ├── evaluate.py              # 标准多阈值检测评估器（IoU 0.50/0.75/诊断 0.10）
+│   └── demo_app.py              # Web 演示系统（真实推理回放，无任何伪造数据）
 ├── src/
 │   └── pcb_vlm/
-│       ├── models/            # Qwen2-VL 与 DeepSeek-VL2 适配器
-│       ├── geometry/          # 物理切片生成与全局坐标 NMS 逆变换
-│       └── evaluation/        # 工业元器件贪婪匹配评估器
-└── tests/                     # 覆盖全部核心模块的单元测试套件
+│       ├── models/              # Qwen2-VL 与 DeepSeek-VL-1.3B 适配器
+│       ├── geometry/            # 几何切片生成与坐标映射变换
+│       └── evaluation/          # 目标检测匹配算法
+└── tests/                       # 单元测试与坐标协议验证套件
 ```
 
 ---
 
-## 📜 论文引用与致谢
+## 📜 数据集与参考文献规范
 
-本项目使用开源基础模型与数据集：
-- **基座大模型**：`Qwen/Qwen2-VL-2B-Instruct` (Alibaba Cloud / Qwen Team)
-- **数据集**：Georgia Tech RIPL WACV 2019 Printed Circuit Board Dataset
-- **微调框架**：Hugging Face Transformers & PEFT
+- **基座大模型**：
+  - `Qwen/Qwen2-VL-2B-Instruct` (Alibaba Cloud / Qwen Team)
+  - `deepseek-ai/deepseek-vl-1.3b-chat` (DeepSeek)
+- **实验数据集**：
+  - Georgia Tech RIPL Printed Circuit Board Dataset: Kuo et al., "Expert-Level Detection of PCB Components with Deep Learning", WACV 2019. (47 high-res PCB images, 29 canonical physical boards).
+- **特别声明**：
+  - 本项目当前实验所用数据为上述 WACV 2019 数据集，非 FICS-PCB / FPIC 数据集；两者拍摄设备与标注规范不同，在毕业论文中须明确区分并向导师报备确认。
+

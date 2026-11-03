@@ -1,5 +1,6 @@
-version: 1.0-frozen
+version: 2.2-canonical-frozen
 task: electronic_component_detection
+dataset_canonical_dir: C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical
 categories:
 - button
 - capacitor
@@ -12,9 +13,9 @@ categories:
 - resistor
 - switch
 - transistor
-prompt: Detect the button, capacitor, clock, connector, diode, ic, inductor, led,
-  resistor, switch, transistor in this image. Return the bounding box coordinates
-  [ymin, xmin, ymax, xmax] for each detected object.
+prompt: 'Locate all button, capacitor, clock, connector, diode, ic, inductor, led,
+  resistor, switch, transistor on this PCB image. Output each bounding box in normalized
+  [0, 1000] coordinates: label <|box_start|>(xmin,ymin),(xmax,ymax)<|box_end|>'
 generation:
   do_sample: false
   max_new_tokens: 1024
@@ -27,33 +28,29 @@ tiling:
 evaluation:
   iou_thresholds:
   - 0.5
-  - 0.25
-  - 0.1
+  - 0.75
+  diagnostic_threshold: 0.1
   metrics:
   - precision
   - recall
   - f1
-  - support
+  - mAP_50_95
   - latency_ms
   - peak_vram_mb
 models:
   qwen_base: C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master
-  qwen_lora: C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage14_lora_training\best_adapter
+  qwen_lora: null
 test_split:
   image_ids:
-  - 10
-  - 11
-  - 19
-  - 27
-  - 40
-  - 41
-  - 42
-  - 43
+  - 21
+  - 22
+  - 28
+  - 35
+  - 39
   boards:
-  - DuetWIFI
-  - ML450_Top1
-  - STK644
-  - XCM-307A
-  - XLVDSproSupply
-  total_images: 8
-final_protocol_hash: 872e3c796403243306c995316733d8fb98f9469abaee0d062f6de00575316dec
+  - MicroZed
+  - Spartan3
+  - ThingMagicM6e
+  - Virtex6
+  total_images: 5
+final_protocol_hash: 7a1365c8045d26d0ff6fbd48ef12682c02dd5268448a247995a8afe42040f55d

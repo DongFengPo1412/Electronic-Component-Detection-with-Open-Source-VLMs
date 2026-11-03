@@ -63,6 +63,38 @@ class TestTiling(unittest.TestCase):
         merged = nms_merge_predictions(preds, iou_threshold=0.50)
         self.assertEqual(len(merged), 2)
 
+    def test_composite_tile_status_aggregation(self):
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
+        from infer_batch import compute_composite_tile_status
+
+        # 1. All slices parse_failed -> parse_failed
+        s1 = compute_composite_tile_status({"parse_failed": 4}, total_tiles=4, num_merged_objects=0)
+        self.assertEqual(s1, "parse_failed")
+
+        # 2. All slices parse_filtered -> parse_filtered (NOT no_objects_detected)
+        s2 = compute_composite_tile_status({"parse_filtered": 4}, total_tiles=4, num_merged_objects=0)
+        self.assertEqual(s2, "parse_filtered")
+
+        # 3. All slices genuinely clean no_objects_detected -> no_objects_detected
+        s3 = compute_composite_tile_status({"no_objects_detected": 4}, total_tiles=4, num_merged_objects=0)
+        self.assertEqual(s3, "no_objects_detected")
+
+        # 4. Partial failure without objects -> partial_failed
+        s4 = compute_composite_tile_status({"no_objects_detected": 3, "parse_failed": 1}, total_tiles=4, num_merged_objects=0)
+        self.assertEqual(s4, "partial_failed")
+
+        # 5. Some filtered, some no_objects, 0 objects -> parse_filtered
+        s5 = compute_composite_tile_status({"no_objects_detected": 2, "parse_filtered": 2}, total_tiles=4, num_merged_objects=0)
+        self.assertEqual(s5, "parse_filtered")
+
+        # 6. Objects detected but some tiles were truncated/filtered -> partial_success
+        s6 = compute_composite_tile_status({"success": 2, "parse_filtered": 1, "partial_success": 1}, total_tiles=4, num_merged_objects=3)
+        self.assertEqual(s6, "partial_success")
+
+        # 7. Clean success
+        s7 = compute_composite_tile_status({"success": 4}, total_tiles=4, num_merged_objects=5)
+        self.assertEqual(s7, "success")
+
 
 if __name__ == "__main__":
     unittest.main()

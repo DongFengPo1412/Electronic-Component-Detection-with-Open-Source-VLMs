@@ -1,55 +1,86 @@
 # Task Definition for Electronic-Component-Detection-with-Open-Source-VLMs
+# Version: 2.3-canonical-verified
 task_name: "Electronic-Component-Detection-with-Open-Source-VLMs"
 thesis_title_zh: "基于开源视觉语言大模型的电子元器件检测"
 
 task_definition:
-  input_type: "已装配印刷电路板（PCB）可见光图像"
-  output_type: "电子元器件类别标签及水平矩形边界框坐标 [x1, y1, x2, y2]"
-  subsets:
-    - name: "Microscope"
-      description: "显微镜成像子集，局部高倍率、微距、细小贴片元件"
-    - name: "DSLR"
-      description: "单反数码相机成像子集，整板/广角视野、多角度光照"
+  dataset_name: "Georgia Tech PCB WACV 2019 (FPIC)"
+  input_type: "已装配印刷电路板（PCB）高分辨率可见光图像"
+  output_type: "电子元器件类别标签及水平矩形边界框像素坐标 [x1, y1, x2, y2]"
+  splits_source: "annotations_v2_canonical/splits.json"
+  split_policy: "按物理PCB板卡严格划分（Train/Val/Test板卡完全互斥，零数据污染）"
 
-candidate_categories:
+canonical_categories:
   - id: 1
-    name: "resistor"
-    zh: "电阻"
-  - id: 2
     name: "capacitor"
     zh: "电容"
+  - id: 2
+    name: "resistor"
+    zh: "电阻"
   - id: 3
-    name: "inductor"
-    zh: "电感"
-  - id: 4
-    name: "diode"
-    zh: "二极管"
-  - id: 5
-    name: "transistor"
-    zh: "晶体管"
-  - id: 6
     name: "ic"
     zh: "集成电路芯片"
+  - id: 4
+    name: "connector"
+    zh: "连接器/接插件"
+  - id: 5
+    name: "led"
+    zh: "发光二极管"
+  - id: 6
+    name: "transistor"
+    zh: "晶体管/三极管"
+  - id: 7
+    name: "diode"
+    zh: "二极管"
+  - id: 8
+    name: "inductor"
+    zh: "电感"
+  - id: 9
+    name: "button"
+    zh: "按键"
+  - id: 10
+    name: "switch"
+    zh: "开关"
+  - id: 11
+    name: "clock"
+    zh: "晶振/时钟"
+
+coordinate_protocol:
+  canonical_unit: "像素绝对坐标 [x1, y1, x2, y2] (xmin, ymin, xmax, ymax)"
+  qwen_vlm_protocol:
+    format: "label <|box_start|>(xmin,ymin),(xmax,ymax)<|box_end|>"
+    normalization: "[0, 1000] 归一化整型/浮点坐标"
+    coordinate_order: "x-first: (xmin, ymin), (xmax, ymax)"
+  deepseek_vlm_protocol:
+    format: "<|ref|>{label}<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>"
+    normalization: "[0, 1000] 归一化坐标"
+    conversion: "统一经由 parse_grounding_output_with_status 转换为原图像素 xyxy"
 
 models:
-  primary_train_candidate: "Qwen/Qwen3-VL-2B-Instruct"
-  primary_local_fallback: "Qwen/Qwen2.5-VL-3B-Instruct-AWQ"
-  comparative_candidate: "deepseek-ai/deepseek-vl2-tiny"
+  primary_vlm:
+    model_id: "Qwen/Qwen2-VL-2B-Instruct"
+    architecture: "Qwen2-VL (ViT + Qwen2 LM)"
+    local_snapshot: "models/models/Qwen--Qwen2-VL-2B-Instruct/snapshots/master"
+    supported_roles: ["inference", "tiling", "lora_sft"]
+  comparative_vlm:
+    model_id: "deepseek-ai/deepseek-vl-1.3b-chat"
+    architecture: "DeepSeek-VL (SigLIP-L + DeepSeek-LLM-1.3B)"
+    local_snapshot: "models/models/deepseek-ai--deepseek-vl-1.3b-chat/snapshots/master"
+    supported_roles: ["inference", "comparative_baseline"]
 
 evaluation:
   primary_metrics:
-    - "Precision@IoU=0.50"
-    - "Recall@IoU=0.50"
+    - "Official_COCO_AP50"
+    - "Official_COCO_mAP50_95"
+    - "Precision@IoU=0.50 (Micro & Macro)"
+    - "Recall@IoU=0.50 (Micro & Macro)"
     - "F1@IoU=0.50"
-    - "Parse_Success_Rate"
+    - "Parse_Success_Rate (分母为全部预期评估图片数)"
   secondary_metrics:
     - "Precision@IoU=0.75"
-    - "Recall@IoU=0.75"
-    - "F1@IoU=0.75"
     - "Inference_Latency_ms"
-    - "Peak_VRAM_MB"
-  coco_ap_policy: "若导师或评分明确要求 AP，采用长度归一化 Token Logprob 作为排序置信度计算 AP50 与 AP@[.50:.95]"
+    - "Peak_VRAM_MB (全过程峰值)"
 
 hardware:
   local_environment: "NVIDIA GeForce RTX 4060 Laptop GPU (8GB VRAM), Local Dev & Inference"
-  cloud_training_policy: "需用户明确授权具体规格（如 1x RTX 4090 24GB）、预算及时间上限"
+  training_precision: "bfloat16"

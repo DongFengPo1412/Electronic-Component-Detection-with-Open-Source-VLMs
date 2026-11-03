@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import sys
 from typing import Dict, Any
 
@@ -32,6 +33,21 @@ def validate_splits(splits_path: str) -> Dict[str, Any]:
     board_leakage_vt = val_boards & test_boards
     has_board_leakage = bool(board_leakage_tv or board_leakage_tt or board_leakage_vt)
 
+    # 1b. Canonical physical board check (verifying multi-view images like ML450_Top1/Top2/Bottom1)
+    canonical_map_path = os.path.join(os.path.dirname(__file__), "..", "configs", "board_canonical_map.json")
+    has_phys_leakage = False
+    phys_leakage_tv, phys_leakage_tt, phys_leakage_vt = set(), set(), set()
+    if os.path.exists(canonical_map_path):
+        with open(canonical_map_path, "r", encoding="utf-8") as f:
+            canonical_map = json.load(f).get("mapping", {})
+        train_phys = set(canonical_map.get(f, f) for f in train_folders)
+        val_phys = set(canonical_map.get(f, f) for f in val_folders)
+        test_phys = set(canonical_map.get(f, f) for f in test_folders)
+        phys_leakage_tv = train_phys & val_phys
+        phys_leakage_tt = train_phys & test_phys
+        phys_leakage_vt = val_phys & test_phys
+        has_phys_leakage = bool(phys_leakage_tv or phys_leakage_tt or phys_leakage_vt)
+
     # 2. Image overlap check
     img_leakage_tv = train_images & val_images
     img_leakage_tt = train_images & test_images
@@ -44,6 +60,7 @@ def validate_splits(splits_path: str) -> Dict[str, Any]:
 
     passed_all_checks = (
         not has_board_leakage
+        and not has_phys_leakage
         and not has_img_leakage
         and total_split_boards == meta["total_physical_boards"]
         and total_split_images == meta["total_images"]
@@ -57,7 +74,13 @@ def validate_splits(splits_path: str) -> Dict[str, Any]:
             "train_val_board_overlap": list(board_leakage_tv),
             "train_test_board_overlap": list(board_leakage_tt),
             "val_test_board_overlap": list(board_leakage_vt),
-            "zero_board_leakage": not has_board_leakage
+            "zero_board_leakage": not has_board_leakage,
+            "canonical_physical_board_leakage": {
+                "train_val": list(phys_leakage_tv),
+                "train_test": list(phys_leakage_tt),
+                "val_test": list(phys_leakage_vt),
+                "zero_canonical_leakage": not has_phys_leakage
+            }
         },
         "image_isolation_audit": {
             "train_val_image_overlap": list(img_leakage_tv),

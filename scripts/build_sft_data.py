@@ -33,20 +33,21 @@ def bbox_intersection_area(b1: List[float], b2: List[float]) -> float:
 def build_qwen_grounding_target(objects: List[Dict[str, Any]], img_w: int, img_h: int) -> str:
     """
     Format objects into Qwen2-VL native grounding string:
-    <|object_ref_start|>label<|object_ref_end|><|box_start|>(ymin,xmin),(ymax,xmax)<|box_end|>
-    Sorted spatially by ymin, then xmin.
+    <|object_ref_start|>label<|object_ref_end|><|box_start|>(xmin,ymin),(xmax,ymax)<|box_end|>
+    Sorted spatially top-to-bottom (ymin), then left-to-right (xmin).
     """
     if not objects:
         return "None"
 
-    # Sort objects top-to-bottom, left-to-right
-    sorted_objs = sorted(objects, key=lambda o: (o["norm_box"][0], o["norm_box"][1]))
+    # Sort objects top-to-bottom (ymin), left-to-right (xmin)
+    # norm_box is [xmin, ymin, xmax, ymax]
+    sorted_objs = sorted(objects, key=lambda o: (o["norm_box"][1], o["norm_box"][0]))
 
     tokens = []
     for obj in sorted_objs:
         label = obj["label"]
-        ymin, xmin, ymax, xmax = obj["norm_box"]
-        tokens.append(f"<|object_ref_start|>{label}<|object_ref_end|><|box_start|>({ymin},{xmin}),({ymax},{xmax})<|box_end|>")
+        xmin, ymin, xmax, ymax = obj["norm_box"]
+        tokens.append(f"<|object_ref_start|>{label}<|object_ref_end|><|box_start|>({xmin},{ymin}),({xmax},{ymax})<|box_end|>")
 
     return ", ".join(tokens)
 
@@ -66,7 +67,7 @@ def process_split_sft(
 ) -> List[Dict[str, Any]]:
     os.makedirs(crops_dir, exist_ok=True)
     classes_str = ", ".join(target_classes)
-    prompt = f"<image>\nDetect the {classes_str} in this image. Return the bounding box coordinates [ymin, xmin, ymax, xmax] for each detected object."
+    prompt = f"<image>\nLocate all {classes_str} on this PCB image. Output each bounding box in normalized [0, 1000] coordinates: label <|box_start|>(xmin,ymin),(xmax,ymax)<|box_end|>"
 
     manifest_by_id = {item["image_id"]: item for item in manifest}
     sft_records = []
@@ -106,14 +107,14 @@ def process_split_sft(
         whole_objs = []
         for g in gt_boxes:
             x1, y1, x2, y2 = g["bbox"]
-            ymin = int(round(max(0.0, min(1000.0, (y1 / float(h)) * 1000))))
             xmin = int(round(max(0.0, min(1000.0, (x1 / float(w)) * 1000))))
-            ymax = int(round(max(0.0, min(1000.0, (y2 / float(h)) * 1000))))
+            ymin = int(round(max(0.0, min(1000.0, (y1 / float(h)) * 1000))))
             xmax = int(round(max(0.0, min(1000.0, (x2 / float(w)) * 1000))))
+            ymax = int(round(max(0.0, min(1000.0, (y2 / float(h)) * 1000))))
             if xmax > xmin and ymax > ymin:
                 whole_objs.append({
                     "label": g["label"],
-                    "norm_box": [ymin, xmin, ymax, xmax]
+                    "norm_box": [xmin, ymin, xmax, ymax]
                 })
 
         if whole_objs:
@@ -138,6 +139,7 @@ def process_split_sft(
             tile_w = tx2 - tx1
             tile_h = ty2 - ty1
 
+            has_any_intersection = False
             tile_objs = []
             for g in gt_boxes:
                 gx1, gy1, gx2, gy2 = g["bbox"]
@@ -146,69 +148,85 @@ def process_split_sft(
                 if orig_area <= 0:
                     continue
 
+                if inter_area > 0:
+                    has_any_intersection = True
+
                 visibility = inter_area / orig_area
                 if visibility >= min_visibility:
                     # Map to tile local coordinates
-                    lx1 = max(0.0, min(tile_w, gx1 - tx1))
-                    ly1 = max(0.0, min(tile_h, gy1 - ty1))
-                    lx2 = max(0.0, min(tile_w, gx2 - tx1))
-                    ly2 = max(0.0, min(tile_h, gy2 - ty1))
+                    lx1 = max(0.0, min(float(tile_w), gx1 - tx1))
+                    ly1 = max(0.0, min(float(tile_h), gy1 - ty1))
+                    lx2 = max(0.0, min(float(tile_w), gx2 - tx1))
+                    ly2 = max(0.0, min(float(tile_h), gy2 - ty1))
 
-                    ymin = int(round(max(0.0, min(1000.0, (ly1 / float(tile_h)) * 1000))))
                     xmin = int(round(max(0.0, min(1000.0, (lx1 / float(tile_w)) * 1000))))
-                    ymax = int(round(max(0.0, min(1000.0, (ly2 / float(tile_h)) * 1000))))
+                    ymin = int(round(max(0.0, min(1000.0, (ly1 / float(tile_h)) * 1000))))
                     xmax = int(round(max(0.0, min(1000.0, (lx2 / float(tile_w)) * 1000))))
+                    ymax = int(round(max(0.0, min(1000.0, (ly2 / float(tile_h)) * 1000))))
 
                     if xmax > xmin and ymax > ymin:
                         tile_objs.append({
                             "label": g["label"],
-                            "norm_box": [ymin, xmin, ymax, xmax]
+                            "norm_box": [xmin, ymin, xmax, ymax]
                         })
 
-            # Save tile crop image if it contains objects
             if tile_objs:
-                crop_fname = f"{split_name}_{iid}_tile_{t_idx:03d}.jpg"
+                # Positive tile sample containing components meeting visibility threshold
+                crop_fname = f"{split_name}_{iid}_tile_{t_idx:03d}.png"
                 crop_path = os.path.join(crops_dir, crop_fname)
                 crop_img = pil_img.crop((tx1, ty1, tx2, ty2))
-                crop_img.save(crop_path, quality=95)
+                crop_img.save(crop_path, format="PNG")
 
                 sft_records.append({
                     "id": f"{split_name}_tile_{iid}_{t_idx:03d}",
                     "image": os.path.abspath(crop_path),
+                    "orig_image_id": iid,
                     "width": tile_w,
                     "height": tile_h,
                     "board_folder": folder,
+                    "tile_bbox": [tx1, ty1, tx2, ty2],
                     "tile_offset": [tx1, ty1],
                     "conversations": [
                         {"from": "user", "value": prompt},
                         {"from": "assistant", "value": build_qwen_grounding_target(tile_objs, tile_w, tile_h)}
                     ],
                     "num_objects": len(tile_objs),
-                    "is_negative": False
+                    "is_negative": False,
+                    "sft_version": "2.3_canonical"
                 })
                 total_components_included += len(tile_objs)
             else:
-                # Hard Negative Mining: sample 1 in 3 empty tiles (pure substrate, pin rows, copper traces)
-                if t_idx % 3 == 0:
-                    crop_fname = f"{split_name}_{iid}_tile_neg_{t_idx:03d}.jpg"
-                    crop_path = os.path.join(crops_dir, crop_fname)
-                    crop_img = pil_img.crop((tx1, ty1, tx2, ty2))
-                    crop_img.save(crop_path, quality=95)
+                # tile_objs is empty: distinguish truly empty tile from excluded boundary component
+                if has_any_intersection:
+                    # Boundary components are visible on the edge but below min_visibility.
+                    # STRICT: Must NOT label as 'None', which would train model that visible edge components are non-objects.
+                    continue
+                else:
+                    # Truly empty tile (0 components intersecting with tile bbox).
+                    # Hard Negative Mining: sample 1 in 3 clean empty tiles
+                    if t_idx % 3 == 0:
+                        crop_fname = f"{split_name}_{iid}_tile_neg_{t_idx:03d}.png"
+                        crop_path = os.path.join(crops_dir, crop_fname)
+                        crop_img = pil_img.crop((tx1, ty1, tx2, ty2))
+                        crop_img.save(crop_path, format="PNG")
 
-                    sft_records.append({
-                        "id": f"{split_name}_tile_neg_{iid}_{t_idx:03d}",
-                        "image": os.path.abspath(crop_path),
-                        "width": tile_w,
-                        "height": tile_h,
-                        "board_folder": folder,
-                        "tile_offset": [tx1, ty1],
-                        "conversations": [
-                            {"from": "user", "value": prompt},
-                            {"from": "assistant", "value": "None"}
-                        ],
-                        "num_objects": 0,
-                        "is_negative": True
-                    })
+                        sft_records.append({
+                            "id": f"{split_name}_tile_neg_{iid}_{t_idx:03d}",
+                            "image": os.path.abspath(crop_path),
+                            "orig_image_id": iid,
+                            "width": tile_w,
+                            "height": tile_h,
+                            "board_folder": folder,
+                            "tile_bbox": [tx1, ty1, tx2, ty2],
+                            "tile_offset": [tx1, ty1],
+                            "conversations": [
+                                {"from": "user", "value": prompt},
+                                {"from": "assistant", "value": "None"}
+                            ],
+                            "num_objects": 0,
+                            "is_negative": True,
+                            "sft_version": "2.3_canonical"
+                        })
 
     return sft_records
 

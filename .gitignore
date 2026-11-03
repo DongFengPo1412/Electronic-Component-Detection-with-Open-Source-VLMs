@@ -16,8 +16,9 @@ ENV/
 configs/paths.local.yaml
 
 # Datasets and raw files
-data/
-datasets/
+/data/
+!src/pcb_vlm/data/
+/datasets/
 *.zip
 *.tar
 *.tar.gz

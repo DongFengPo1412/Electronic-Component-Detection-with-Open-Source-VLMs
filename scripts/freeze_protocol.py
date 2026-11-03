@@ -12,12 +12,19 @@ import sys
 import json
 import hashlib
 import yaml
+import argparse
 
 def main():
+    parser = argparse.ArgumentParser(description="Freeze and audit canonical experimental protocol.")
+    parser.add_argument("--splits", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical\splits.json", help="Path to canonical splits.json")
+    parser.add_argument("--coco", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical\coco_annotations.json", help="Path to canonical coco_annotations.json")
+    parser.add_argument("--lora-adapter", default=None, help="Optional canonical LoRA adapter path")
+    args = parser.parse_args()
+
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    splits_file = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations\splits.json"
-    coco_file = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations\coco_annotations.json"
-    lora_adapter_dir = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage14_lora_training\best_adapter"
+    splits_file = args.splits
+    coco_file = args.coco
+    lora_adapter_dir = args.lora_adapter
 
     with open(splits_file, "r", encoding="utf-8") as f:
         splits = json.load(f)
@@ -36,13 +43,14 @@ def main():
 
     # 2. Frozen Protocol Configuration
     protocol = {
-        "version": "1.0-frozen",
+        "version": "2.2-canonical-frozen",
         "task": "electronic_component_detection",
+        "dataset_canonical_dir": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical",
         "categories": [
             "button", "capacitor", "clock", "connector", "diode",
             "ic", "inductor", "led", "resistor", "switch", "transistor"
         ],
-        "prompt": "Detect the button, capacitor, clock, connector, diode, ic, inductor, led, resistor, switch, transistor in this image. Return the bounding box coordinates [ymin, xmin, ymax, xmax] for each detected object.",
+        "prompt": "Locate all button, capacitor, clock, connector, diode, ic, inductor, led, resistor, switch, transistor on this PCB image. Output each bounding box in normalized [0, 1000] coordinates: label <|box_start|>(xmin,ymin),(xmax,ymax)<|box_end|>",
         "generation": {
             "do_sample": False,
             "max_new_tokens": 1024,
@@ -55,8 +63,9 @@ def main():
             "nms_iou_threshold": 0.50
         },
         "evaluation": {
-            "iou_thresholds": [0.50, 0.25, 0.10],
-            "metrics": ["precision", "recall", "f1", "support", "latency_ms", "peak_vram_mb"]
+            "iou_thresholds": [0.50, 0.75],
+            "diagnostic_threshold": 0.10,
+            "metrics": ["precision", "recall", "f1", "mAP_50_95", "latency_ms", "peak_vram_mb"]
         },
         "models": {
             "qwen_base": "C:\\Users\\Liu\\.codex\\cache\\tasks\\pcb-vlm-antigravity-20261024\\models\\models\\Qwen--Qwen2-VL-2B-Instruct\\snapshots\\master",

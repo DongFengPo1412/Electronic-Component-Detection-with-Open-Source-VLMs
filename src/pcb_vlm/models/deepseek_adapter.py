@@ -1,22 +1,60 @@
-"""DeepSeek-VL2 Model Adapter for Electronic Component Detection and Visual Grounding."""
+"""DeepSeek-VL-1.3B Model Adapter for PCB Image Analysis.
+
+Architecture & Scope Note:
+    The deployed checkpoint is `deepseek-ai/deepseek-vl-1.3b-chat` (DeepSeek-VL v1 generation).
+    Unlike DeepSeek-VL2 (which introduced native visual grounding with `<|ref|>` and `<|det|>` heads),
+    DeepSeek-VL-1.3B is a general vision-language dialogue foundation model.
+    When given explicit coordinate grounding instructions, if it generates natural language descriptions
+    instead of coordinates, the parser accurately flags the output as `parse_failed` (format mismatch)
+    rather than misrepresenting it as `no_objects_detected`.
+"""
 
 import os
 import re
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from PIL import Image
 import torch
+
+DEFAULT_PCB_CLASSES = [
+    "button", "capacitor", "clock", "connector", "diode",
+    "ic", "inductor", "led", "resistor", "switch", "transistor"
+]
 
 
 class DeepSeekAdapter:
     def __init__(
         self,
-        model_id: str = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
+        model_id: Optional[str] = None,
+        model_path: Optional[str] = None,
         device: str = "cuda",
         torch_dtype = torch.bfloat16,
         cache_dir: Optional[str] = None
     ):
-        self.model_id = model_id
+        known_aliases = {
+            "deepseek-ai/deepseek-vl-1.3b-chat": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
+            "deepseek-vl-1.3b": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
+            "deepseek": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master"
+        }
+        requested = model_path or model_id or "deepseek-ai/deepseek-vl-1.3b-chat"
+        self.requested_model = requested
+
+        if model_path and os.path.exists(model_path):
+            target_path = model_path
+        elif model_id and model_id in known_aliases:
+            target_path = known_aliases[model_id]
+        elif requested in known_aliases:
+            target_path = known_aliases[requested]
+        elif os.path.exists(r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master") and (model_id == "deepseek-ai/deepseek-vl-1.3b-chat" or not model_id):
+            target_path = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master"
+        else:
+            raise FileNotFoundError(
+                f"Requested model '{requested}' does not exist on disk and is not a recognized local alias! "
+                f"Silent fallback is strictly prohibited."
+            )
+
+        self.model_id = target_path
+        self.model_path = target_path
         self.device = device
         self.torch_dtype = torch_dtype
         self.cache_dir = cache_dir
@@ -28,18 +66,8 @@ class DeepSeekAdapter:
         if self.model is not None:
             return
 
-        default_cached = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master"
-        if os.path.exists(self.model_id):
-            model_path = self.model_id
-        elif os.path.exists(default_cached):
-            model_path = default_cached
-        else:
-            print(f"Resolving model {self.model_id} via ModelScope...")
-            from modelscope import snapshot_download
-            model_path = snapshot_download(self.model_id, cache_dir=self.cache_dir)
-            print(f"DeepSeek model path resolved: {model_path}")
-
-        print(f"Loading DeepSeek-VL from {model_path} on {self.device}...")
+        model_path = self.model_path
+        print(f"Loading DeepSeek-VL from {model_path} (requested: {self.requested_model}) on {self.device}...")
         t0 = time.time()
         from deepseek_vl.models import VLChatProcessor, MultiModalityCausalLM
         self.processor = VLChatProcessor.from_pretrained(model_path)
@@ -56,13 +84,18 @@ class DeepSeekAdapter:
         print(f"DeepSeek-VL successfully loaded in {load_time:.2f}s.")
 
     def build_prompt(self, target_classes: Optional[List[str]] = None) -> str:
+        """Construct prompt for DeepSeek-VL-1.3B with unified 11 PCB classes and explicit coordinates request."""
         if not target_classes:
-            target_classes = ["ic", "capacitor", "resistor", "connector", "led", "transistor", "diode", "inductor", "button"]
+            target_classes = DEFAULT_PCB_CLASSES
         classes_str = ", ".join(target_classes)
-        return f"<|ref|>Locate all {classes_str} on this PCB image.<|/ref|><|det|>"
+        return (
+            f"Locate all {classes_str} on this PCB image. "
+            f"Output each bounding box in normalized [0, 1000] coordinates: category [ymin, xmin, ymax, xmax]. "
+            f"If no target components are visible, output 'None'."
+        )
 
-    def parse_grounding_output(self, text: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-        """Parse DeepSeek-VL2 grounding tokens <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|> to pixel xyxy."""
+    def parse_grounding_output_with_status(self, text: str, img_w: int, img_h: int) -> Tuple[List[Dict[str, Any]], str, str]:
+        """Parse grounding tokens or coordinate tuples to pixel xyxy, returning explicit status."""
         detected = []
 
         # 1. Native DeepSeek-VL2 grounding format:
@@ -70,12 +103,10 @@ class DeepSeekAdapter:
         ref_blocks = re.findall(r"<\|ref\|>(.*?)<\|/ref\|>\s*<\|det\|>(.*?)<\|/det\|>", text, re.DOTALL)
         for label, det_content in ref_blocks:
             clean_label = label.strip().lower()
-            # Extract coordinate quadruplets [c1, c2, c3, c4]
-            box_matches = re.findall(r"\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]", det_content)
+            box_matches = re.findall(r"\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]", det_content)
             for c1_s, c2_s, c3_s, c4_s in box_matches:
                 c1, c2, c3, c4 = float(c1_s), float(c2_s), float(c3_s), float(c4_s)
-                # DeepSeek-VL2 uses normalized [0, 1000] scale in [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax]
-                # Canonical mapping: [ymin, xmin, ymax, xmax]
+                # DeepSeek canonical coordinate scale [ymin, xmin, ymax, xmax] in [0, 1000]
                 x1 = max(0.0, min(float(img_w), (c2 / 1000.0) * img_w))
                 y1 = max(0.0, min(float(img_h), (c1 / 1000.0) * img_h))
                 x2 = max(0.0, min(float(img_w), (c4 / 1000.0) * img_w))
@@ -88,21 +119,24 @@ class DeepSeekAdapter:
                         "raw_norm_box": [c1, c2, c3, c4]
                     })
 
-        # 2. Fallback regex for standard [c1, c2, c3, c4] bracketed quadruplets
-        if not detected:
-            quad_pattern = r"([a-zA-Z_\-]+)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"
-            for label, c1_s, c2_s, c3_s, c4_s in re.findall(quad_pattern, text):
-                c1, c2, c3, c4 = float(c1_s), float(c2_s), float(c3_s), float(c4_s)
-                x1 = max(0.0, min(float(img_w), (c2 / 1000.0) * img_w))
-                y1 = max(0.0, min(float(img_h), (c1 / 1000.0) * img_h))
-                x2 = max(0.0, min(float(img_w), (c4 / 1000.0) * img_w))
-                y2 = max(0.0, min(float(img_h), (c3 / 1000.0) * img_h))
-                if x2 > x1 and y2 > y1:
-                    detected.append({
-                        "label": label.strip().lower(),
-                        "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
-                        "raw_norm_box": [c1, c2, c3, c4]
-                    })
+        # 2. Fallback regex for bracketed quadruplets: [category] [c1, c2, c3, c4]
+        # Remove native grounding blocks so their inner brackets are not matched twice
+        remaining_text = re.sub(r"<\|ref\|>.*?<\|/ref\|>\s*<\|det\|>.*?<\|/det\|>", " ", text, flags=re.DOTALL)
+        quad_pattern = r"(?:([a-zA-Z_\-]+)\s*)?\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]"
+        for label, c1_s, c2_s, c3_s, c4_s in re.findall(quad_pattern, remaining_text):
+            clean_label = label.strip().lower() if label else "component"
+            c1, c2, c3, c4 = float(c1_s), float(c2_s), float(c3_s), float(c4_s)
+            x1 = max(0.0, min(float(img_w), (c2 / 1000.0) * img_w))
+            y1 = max(0.0, min(float(img_h), (c1 / 1000.0) * img_h))
+            x2 = max(0.0, min(float(img_w), (c4 / 1000.0) * img_w))
+            y2 = max(0.0, min(float(img_h), (c3 / 1000.0) * img_h))
+            if x2 > x1 and y2 > y1:
+                detected.append({
+                    "label": clean_label,
+                    "bbox_xyxy": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                    "raw_norm_box": [c1, c2, c3, c4]
+                })
+
         # Geometric validity and anti-repetition filter
         filtered_detected = []
         for d in detected:
@@ -122,13 +156,36 @@ class DeepSeekAdapter:
                     continue
             filtered_detected.append(d)
 
-        return filtered_detected
+        # Status determination
+        clean_text = text.strip()
+        lower_text = clean_text.lower()
+
+        if filtered_detected:
+            status = "success"
+            status_detail = f"Successfully parsed {len(filtered_detected)} bounding boxes"
+        elif clean_text != "" and (clean_text == "None" or clean_text == "[]" or bool(re.search(r"\b(?:none|no components?|no objects?|no targets?|not detected)\b", lower_text))):
+            status = "no_objects_detected"
+            status_detail = "Model explicitly reported no components present in the image"
+        elif clean_text == "":
+            status = "parse_failed"
+            status_detail = "Empty response generated by model"
+        else:
+            # Model generated natural language / conversational descriptions without bounding box coordinates
+            status = "parse_failed"
+            status_detail = f"Model generated conversational text without valid bounding box coordinates (format mismatch): '{clean_text[:80]}...'"
+
+        return filtered_detected, status, status_detail
+
+    def parse_grounding_output(self, text: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
+        return self.parse_grounding_output_with_status(text, img_w, img_h)[0]
 
     def predict_image(
         self,
         image_path: str,
         prompt: Optional[str] = None,
-        max_new_tokens: int = 1024
+        max_new_tokens: int = 1024,
+        max_pixels: Optional[int] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         self.load_model()
 
@@ -143,7 +200,6 @@ class DeepSeekAdapter:
             torch.cuda.synchronize()
 
         t0 = time.time()
-        # Conversation input for DeepSeek-VL
         conversation = [
             {
                 "role": "User",
@@ -182,7 +238,7 @@ class DeepSeekAdapter:
 
         latency_ms = (time.time() - t0) * 1000
         raw_output = self.processor.tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=False)
-        detected_objects = self.parse_grounding_output(raw_output, w, h)
+        detected_objects, status, status_detail = self.parse_grounding_output_with_status(raw_output, w, h)
 
         return {
             "image_path": image_path,
@@ -192,6 +248,8 @@ class DeepSeekAdapter:
             "raw_output": raw_output,
             "objects": detected_objects,
             "num_detected": len(detected_objects),
+            "status": status,
+            "status_detail": status_detail,
             "latency_ms": round(latency_ms, 2),
             "peak_vram_mb": round(peak_vram_mb, 2),
             "device": str(self.device)

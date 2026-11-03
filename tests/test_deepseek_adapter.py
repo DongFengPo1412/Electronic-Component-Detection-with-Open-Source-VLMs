@@ -44,8 +44,19 @@ class TestDeepSeekAdapter(unittest.TestCase):
     def test_build_prompt(self):
         prompt = self.adapter.build_prompt(["ic", "resistor"])
         self.assertIn("ic, resistor", prompt)
-        self.assertTrue(prompt.startswith("<|ref|>"))
-        self.assertTrue(prompt.endswith("<|det|>"))
+        self.assertIn("Output each bounding box", prompt)
+
+    def test_conversational_text_marked_parse_failed(self):
+        conv_text = "This is a green printed circuit board containing multiple integrated circuits and capacitors."
+        boxes, status, detail = self.adapter.parse_grounding_output_with_status(conv_text, img_w=1000, img_h=1000)
+        self.assertEqual(len(boxes), 0)
+        self.assertEqual(status, "parse_failed")
+        self.assertIn("format mismatch", detail)
+
+    def test_predict_image_signature(self):
+        import inspect
+        sig = inspect.signature(self.adapter.predict_image)
+        self.assertIn("max_pixels", sig.parameters)
 
 
 if __name__ == "__main__":

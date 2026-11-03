@@ -18,9 +18,22 @@ def xywh_to_xyxy(box: List[float]) -> List[float]:
     return [round(x, 2), round(y, 2), round(x + w, 2), round(y + h, 2)]
 
 
-def qwen_norm_to_xyxy(norm_box: Tuple[float, float, float, float], img_w: int, img_h: int) -> List[float]:
-    """Convert Qwen2-VL normalized (ymin, xmin, ymax, xmax) in [0, 1000] to image pixel [x1, y1, x2, y2]."""
-    ymin, xmin, ymax, xmax = norm_box
+def qwen_norm_to_xyxy(
+    norm_box: Tuple[float, float, float, float],
+    img_w: int,
+    img_h: int,
+    axis_order: str = "xyxy"
+) -> List[float]:
+    """Convert Qwen normalized box in [0, 1000] to image pixel [x1, y1, x2, y2].
+
+    By default uses canonical x-first: norm_box = (xmin, ymin, xmax, ymax).
+    If axis_order == 'yxyx', interprets as (ymin, xmin, ymax, xmax).
+    """
+    if axis_order == "yxyx":
+        ymin, xmin, ymax, xmax = norm_box
+    else:
+        xmin, ymin, xmax, ymax = norm_box
+
     x1 = (xmin / 1000.0) * img_w
     y1 = (ymin / 1000.0) * img_h
     x2 = (xmax / 1000.0) * img_w
@@ -35,14 +48,26 @@ def qwen_norm_to_xyxy(norm_box: Tuple[float, float, float, float], img_w: int, i
     return [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
 
 
-def xyxy_to_qwen_norm(xyxy: List[float], img_w: int, img_h: int) -> Tuple[int, int, int, int]:
-    """Convert image pixel [x1, y1, x2, y2] to Qwen2-VL normalized (ymin, xmin, ymax, xmax) in [0, 1000]."""
+def xyxy_to_qwen_norm(
+    xyxy: List[float],
+    img_w: int,
+    img_h: int,
+    axis_order: str = "xyxy"
+) -> Tuple[int, int, int, int]:
+    """Convert image pixel [x1, y1, x2, y2] to Qwen normalized integers in [0, 1000].
+
+    By default returns canonical x-first: (xmin, ymin, xmax, ymax).
+    If axis_order == 'yxyx', returns (ymin, xmin, ymax, xmax).
+    """
     x1, y1, x2, y2 = xyxy
-    ymin = int(round(max(0.0, min(float(img_h), y1)) / img_h * 1000))
     xmin = int(round(max(0.0, min(float(img_w), x1)) / img_w * 1000))
-    ymax = int(round(max(0.0, min(float(img_h), y2)) / img_h * 1000))
+    ymin = int(round(max(0.0, min(float(img_h), y1)) / img_h * 1000))
     xmax = int(round(max(0.0, min(float(img_w), x2)) / img_w * 1000))
-    return (ymin, xmin, ymax, xmax)
+    ymax = int(round(max(0.0, min(float(img_h), y2)) / img_h * 1000))
+
+    if axis_order == "yxyx":
+        return (ymin, xmin, ymax, xmax)
+    return (xmin, ymin, xmax, ymax)
 
 
 def compute_iou(box1: List[float], box2: List[float]) -> float:

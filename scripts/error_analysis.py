@@ -128,17 +128,23 @@ def analyze_errors_for_predictions(preds, coco_gts):
 
 
 def main():
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    coco_file = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations\coco_annotations.json"
-    splits_file = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations\splits.json"
-    test_runs_dir = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage16_final_test_matrix"
+    parser = argparse.ArgumentParser(description="Analyze detection errors and scale breakdowns.")
+    parser.add_argument("--splits", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical\splits.json", help="Path to splits.json")
+    parser.add_argument("--coco", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical\coco_annotations.json", help="Path to coco_annotations.json")
+    parser.add_argument("--runs-dir", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage16_canonical_test_matrix", help="Runs directory to inspect")
+    parser.add_argument("--split-name", default="test", help="Split name to analyze")
+    args = parser.parse_args()
+
+    coco_file = args.coco
+    splits_file = args.splits
+    test_runs_dir = args.runs_dir
 
     with open(coco_file, "r", encoding="utf-8") as f:
         coco = json.load(f)
     with open(splits_file, "r", encoding="utf-8") as f:
         splits = json.load(f)
 
-    test_ids = set(splits["splits"]["test"]["image_ids"])
+    test_ids = set(splits["splits"][args.split_name]["image_ids"])
     test_gts = [ann for ann in coco["annotations"] if ann["image_id"] in test_ids]
 
     analysis_results = {}

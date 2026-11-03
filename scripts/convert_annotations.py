@@ -24,10 +24,28 @@ def load_classes_config(config_path: str) -> Tuple[List[Dict[str, Any]], Dict[st
     return categories, pattern_to_id, ignore_patterns
 
 
+CANONICAL_MAP_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "board_canonical_map.json")
+_CANONICAL_CACHE = None
+
+def get_canonical_map() -> Dict[str, str]:
+    global _CANONICAL_CACHE
+    if _CANONICAL_CACHE is None:
+        if os.path.exists(CANONICAL_MAP_PATH):
+            with open(CANONICAL_MAP_PATH, "r", encoding="utf-8") as f:
+                _CANONICAL_CACHE = json.load(f).get("mapping", {})
+        else:
+            _CANONICAL_CACHE = {}
+    return _CANONICAL_CACHE
+
 def extract_board_group_id(folder_name: str) -> str:
-    """Extract physical board ID, removing _Top, _Bottom, _Bottom1 etc."""
+    """Extract physical board ID using human-verified canonical mapping table first."""
+    cmap = get_canonical_map()
+    if folder_name in cmap:
+        return cmap[folder_name]
+
+    # Fallback for unforeseen names
     name = folder_name
-    for suffix in ["_Top", "_Bottom", "_Bottom1", "_Bottom2", "_top", "_bottom"]:
+    for suffix in ["_Top1", "_Top2", "_Top", "_Bottom1", "_Bottom2", "_Bottom", "_top", "_bottom"]:
         if name.endswith(suffix):
             name = name[:-len(suffix)]
             break
