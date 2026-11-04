@@ -166,3 +166,9 @@ DeepSeek-VL-1.3B-chat 使用项目明确要求的 `yxyx_norm1000` 数值回答�
 缺失/未知类别不会变成合法元器件，过小或细长但几何合法的框不再被固定阈值误删；重复框保留并计数，交由声明的 NMS/评估处理。
 每次预测保存原文、坐标协议、解析各阶段计数、token/EOS 与截断状态。DeepSeek v1 的图像处理按自身 processor 执行固定 resize/pad，`max_pixels` 不作为实际生效参数。
 官方依据：[Qwen2-VL 论文 2.2.1](https://arxiv.org/html/2409.12191v2#S2.SS2.SSS1)、[DeepSeek-VL v1](https://github.com/deepseek-ai/DeepSeek-VL)、[DeepSeek-VL2](https://github.com/deepseek-ai/DeepSeek-VL2)。
+
+
+### 验证数据语义警报（2026-11-04）
+原始XML包含 `text "LED4/P1.21"`、`text IC1` 等文字标签。旧转换器按整条字符串匹配类别，导致现有canonical标注中至少170条文字框被归入LED/IC；哈希及几何审计通过并不证明类别语义正确。
+转换器现只匹配XML类别字段；audit_dataset增加原XML逐框语义审计。旧数据和历史权重保留，但相关训练/评估须按受污染历史实验理解，不能直接作为正确元器件检测的正式证据。
+本轮诊断使用单独的语义纠错验证真值副本（716GT），没有覆盖原740GT或变更测试板划分，不能与旧成绩直接比较。

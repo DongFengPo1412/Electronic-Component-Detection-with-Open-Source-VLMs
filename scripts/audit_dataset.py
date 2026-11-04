@@ -114,6 +114,15 @@ def audit_coco_dataset(coco_path: str, manifest_path: str, output_report: str = 
     for cid, category in categories.items():
         image_ids = {a['image_id'] for a in annotations if a['category_id'] == cid}
         coverage[category['name']] = {'images': len(image_ids), 'physical_boards': len({physical_id(by_id[i]['folder']) for i in image_ids})}
+    from pcb_vlm.data.raw_labels import audit_annotation_types
+    import yaml
+    config_path = os.path.join(os.path.dirname(__file__), '..', 'configs/classes.yaml')
+    with open(config_path, encoding='utf-8') as stream:
+        class_config = yaml.safe_load(stream)
+    patterns = {pat.lower():cat['id'] for cat in class_config['categories'] for pat in cat.get('raw_patterns',[])}
+    semantics = audit_annotation_types(coco, manifest, patterns, class_config.get('ignore_patterns',[]))
+    audit_summary['raw_xml_semantic_audit'] = semantics
+    audit_summary['quality_audit']['passed_sanity_check'] &= semantics['passed']
     audit_summary['source_errors'] = source_errors
     audit_summary['duplicate_image_hashes'] = [h for h,n in hashes.items() if n > 1]
     audit_summary['category_coverage'] = coverage

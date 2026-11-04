@@ -60,18 +60,8 @@ def compute_sha256(filepath: str) -> str:
 
 
 def match_category(raw_name: str, pattern_to_id: Dict[str, int], ignore_patterns: List[str]) -> Tuple[int, str]:
-    clean_name = raw_name.strip().lower().replace('"', '')
-    # Check ignore first
-    for ign in ignore_patterns:
-        if ign in clean_name and not any(k in clean_name for k in ["capacitor", "resistor", "ic", "diode", "transistor", "led"]):
-            return 0, "ignored"
-
-    # Check categories
-    for pat, cid in pattern_to_id.items():
-        if re.search(r"(?<![a-z0-9])" + re.escape(pat) + r"(?![a-z0-9])", clean_name):
-            return cid, pat
-
-    return 0, "unmatched"
+    from pcb_vlm.data.raw_labels import match_raw_category
+    return match_raw_category(raw_name, pattern_to_id, ignore_patterns)
 
 
 def convert_dataset(raw_dir: str, config_path: str, output_dir: str, viz_dir: str = None) -> Dict[str, Any]:
