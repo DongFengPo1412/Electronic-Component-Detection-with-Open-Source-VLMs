@@ -228,7 +228,50 @@ def process_split_sft(
                             "sft_version": "2.3_canonical"
                         })
 
-    return sft_records
+    # Materialize supervision provenance without changing sampling or target syntax.
+    enriched = []
+    seen = set()
+    excluded = []
+    for record in sft_records:
+        entry = next(e for e in manifest if e['folder'] == record['board_folder'])
+        iid = entry['image_id']
+        crop = record.get('tile_bbox', [0, 0, entry['width'], entry['height']])
+        rw, rh = record['width'], record['height']
+        objects = []
+        boundary_exclusions = []
+        collapsed = False
+        for ann in coco_anns_by_img.get(iid, []):
+            x,y,w,h = ann['bbox']
+            left,top,right,bottom = max(x,crop[0]),max(y,crop[1]),min(x+w,crop[2]),min(y+h,crop[3])
+            overlap = max(0,right-left)*max(0,bottom-top)
+            if not overlap: continue
+            if overlap/(w*h) < min_visibility:
+                boundary_exclusions.append(ann['id']); continue
+            box = [left-crop[0],top-crop[1],right-crop[0],bottom-crop[1]]
+            norm = [int(round(box[0]/rw*1000)),int(round(box[1]/rh*1000)),int(round(box[2]/rw*1000)),int(round(box[3]/rh*1000))]
+            if norm[0]>=norm[2] or norm[1]>=norm[3]: collapsed = True
+            objects.append({'annotation_id':ann['id'],'source_object_id':ann.get('source_object_id'),
+                            'label':cat_id_to_name[ann['category_id']], 'bbox_xyxy':box,'norm_box':norm})
+        if collapsed:
+            excluded.append({'sample_id':record['id'],'reason':'rounding_collapsed_target; entire sample omitted, never silently delete targets'})
+            continue
+        if len(objects) != record['num_objects']:
+            raise ValueError(f'Supervision/GT count mismatch: {record["id"]}')
+        if not objects and boundary_exclusions:
+            raise ValueError(f'Negative includes visible target: {record["id"]}')
+        key = (iid, tuple(crop))
+        if key in seen:
+            excluded.append({'sample_id':record['id'],'reason':'duplicate_source_region'})
+            continue
+        seen.add(key)
+        record.update(image_id=iid, tile_bbox=crop, tile_offset=crop[:2],
+                      is_negative=not objects, sft_version='3.0-semantic',
+                      coordinate_protocol='xyxy_norm1000', visibility_threshold=min_visibility,
+                      supervision_objects=objects, boundary_excluded_annotation_ids=boundary_exclusions)
+        enriched.append(record)
+    with open(os.path.join(output_dir, f'{split_name}_sft_exclusions.json'), 'x', encoding='utf-8') as stream:
+        json.dump(excluded,stream,indent=2)
+    return enriched
 
 
 def main():

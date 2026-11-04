@@ -172,3 +172,11 @@ DeepSeek-VL-1.3B-chat 使用项目明确要求的 `yxyx_norm1000` 数值回答�
 原始XML包含 `text "LED4/P1.21"`、`text IC1` 等文字标签。旧转换器按整条字符串匹配类别，导致现有canonical标注中至少170条文字框被归入LED/IC；哈希及几何审计通过并不证明类别语义正确。
 转换器现只匹配XML类别字段；audit_dataset增加原XML逐框语义审计。旧数据和历史权重保留，但相关训练/评估须按受污染历史实验理解，不能直接作为正确元器件检测的正式证据。
 本轮诊断使用单独的语义纠错验证真值副本（716GT），没有覆盖原740GT或变更测试板划分，不能与旧成绩直接比较。
+
+
+### 语义规范数据 V3（2026-11-04）
+从全部18201个XML对象重新建立V3，保留6594个目标，不以6478为预设数量。旧版漏掉116个合法目标（108 connector、5 clock、button/switch/inductor各1）。对账：6476 unchanged、178 removed、2 relabeled、116 added；每个原对象都有完整ledger记录。
+新数据与旧数据完全分开：`C:/Users/Liu/.codex/cache/tasks/pcb-v3-20261104/annotations_v3_semantic`；SFT为同级 `sft_v3_semantic`。旧47图身份与35/7/5图、21/4/4板划分保持；新GT数量为5044/759/791，旧740验证GT与716局部纠错副本均不等于V3完整验证集。
+使用 `scripts/rebuild_semantic_dataset.py` 及 `configs/semantic_policy_v3.yaml` 重建，`scripts/audit_semantic_v3.py` 独立检查全部XML双向覆盖和SFT像素/监督来源；已有输出目录不会覆盖。
+新Train/Val SFT为451/71条，不生成Test SFT；测试集修正连接器仍只在测试GT中。新的冻结协议另存数据目录的 `frozen_protocol_v3.yaml`，旧冻结协议不覆盖；正式推理须显式 `--protocol <V3协议>`，训练须显式 `--splits-path <V3划分>` 与新SFT路径。
+注意训练87条、验证17条回答超过1024 tokens，均保留完整监督而没有截断；数据审计通过不意味着整套样本可直接在8GB显卡上训练。下一轮必须明确长度预算与样本覆盖。本轮不训练。

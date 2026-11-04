@@ -48,3 +48,19 @@ def audit_annotation_types(coco, manifest, pattern_to_id, ignore_patterns):
         if not any(source['expected_category_id']==ann['category_id'] for source in sources):
             conflicts.append({'annotation_id':ann['id'],'image_id':ann['image_id'],'assigned_category_id':ann['category_id'],'sources':sources})
     return {'conflicts':conflicts,'missing_xml':missing_xml,'passed':not conflicts and not missing_xml}
+
+def classify_raw_name(raw_name, policy):
+    """V3 exact ontology matching. OCR/reference tokens never influence class membership."""
+    if not isinstance(raw_name,str) or not raw_name.strip():
+        return {'raw_class':'','value':'','decision':'ambiguous','reason':'missing_class'}
+    try:
+        fields = shlex.split(raw_name)
+    except ValueError:
+        return {'raw_class':'','value':'','decision':'ambiguous','reason':'malformed_quoting'}
+    kind = ' '.join(fields[0].lower().split())
+    value = ' '.join(fields[1:])
+    if kind in policy['retained_raw_classes']:
+        return {'raw_class':kind,'value':value,'decision':'keep','category':policy['retained_raw_classes'][kind],'reason':'explicit_retained_class'}
+    if kind in policy['ignored_raw_classes']:
+        return {'raw_class':kind,'value':value,'decision':'ignore','reason':policy['ignored_raw_classes'][kind]}
+    return {'raw_class':kind,'value':value,'decision':'ambiguous','reason':'unrecognized_class_not_in_ontology'}

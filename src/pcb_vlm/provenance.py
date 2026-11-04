@@ -52,17 +52,28 @@ def stamp_samples(records, name, splits_path, manifest):
     splits = read_json(splits_path)
     validate_partition(splits, manifest)
     by_folder = {x['folder']: x for x in manifest}
+    cached_hashes = {}
+    def cached_hash(path):
+        key = str(path)
+        if key not in cached_hashes: cached_hashes[key] = sha256(path)
+        return cached_hashes[key]
+    coco_path = Path(splits_path).with_name('coco_annotations.json')
+    data = read_json(coco_path) if coco_path.is_file() else None
     for r in records:
         entry = by_folder[r['board_folder']]
         if entry['image_id'] not in splits['splits'][name]['image_ids']:
             raise ValueError(f'Sample outside {name}: {r.get("id")}')
-        actual_hash = sha256(entry['image_path'])
+        actual_hash = cached_hash(entry['image_path'])
         if actual_hash != entry['sha256']:
             raise ValueError(f'Source image changed: {entry["image_path"]}')
         r.update(image_id=entry['image_id'], physical_board_id=physical_id(entry['folder']),
                  split=name, source_image_sha256=actual_hash,
-                 dataset_sha256=sha256(splits_path), source_image_path=entry['image_path'],
-                 sample_image_sha256=sha256(r['image']))
+                 dataset_sha256=cached_hash(splits_path), source_image_path=entry['image_path'],
+                 sample_image_sha256=cached_hash(r['image']))
+        if data is not None:
+            r.update(dataset_version=data.get('info', {}).get('version', 'unknown'),
+                     annotations_sha256=cached_hash(coco_path),
+                     classes_sha256=hashlib.sha256(json.dumps(data['categories'], sort_keys=True).encode()).hexdigest())
 
 def validate_samples(records, name, splits_path):
     if not records:
@@ -95,6 +106,13 @@ def validate_samples(records, name, splits_path):
         if r.get('id') in seen:
             raise ValueError('Duplicate SFT sample ID')
         seen.add(r.get('id'))
+    coco_path = Path(splits_path).with_name('coco_annotations.json')
+    if coco_path.is_file() and read_json(coco_path).get('info', {}).get('version') == '3.0-semantic':
+        data = read_json(coco_path)
+        class_hash = hashlib.sha256(json.dumps(data['categories'], sort_keys=True).encode()).hexdigest()
+        for r in records:
+            if r.get('dataset_version') != '3.0-semantic' or r.get('annotations_sha256') != sha256(coco_path) or r.get('classes_sha256') != class_hash:
+                raise ValueError('V3 sample annotation/category identity mismatch')
     return sorted({r['physical_board_id'] for r in records})
 
 def model_identity(path):

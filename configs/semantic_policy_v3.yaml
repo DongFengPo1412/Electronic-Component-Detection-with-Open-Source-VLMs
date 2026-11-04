@@ -1,0 +1,54 @@
+version: semantic-v3
+retained_raw_classes:
+  capacitor: capacitor
+  electrolytic capacitor: capacitor
+  tantalum capacitor: capacitor
+  resistor: resistor
+  resistor network: resistor
+  chip resistor: resistor
+  ic: ic
+  integrated circuit: ic
+  connector: connector
+  header: connector
+  terminal: connector
+  led: led
+  light emitting diode: led
+  transistor: transistor
+  mosfet: transistor
+  diode: diode
+  zener diode: diode
+  diode zener array: diode
+  schottky: diode
+  zener: diode
+  inductor: inductor
+  choke: inductor
+  coil: inductor
+  button: button
+  push button: button
+  switch: switch
+  dip switch: switch
+  slide switch: switch
+  clock: clock
+  crystal: clock
+  oscillator: clock
+ignored_raw_classes:
+  text: printed text is not a component
+  component text: text on component is not the component boundary
+  unknown: category itself is unknown; no inferred class
+  jumper: explicitly outside selected task classes
+  resistor jumper: explicitly outside selected task classes
+  capacitor jumper: explicitly outside selected task classes
+  pads: bare pads excluded
+  pins: bare pins excluded
+  test point: test points excluded
+  emi filter: not among selected 11 classes
+  fuse: not among selected 11 classes
+  ferrite bead: not implicitly an inductor
+  potentiometer: not implicitly a resistor
+  display: not among selected 11 classes
+  transformer: not among selected 11 classes
+  battery: not among selected 11 classes
+  heatsink: not among selected 11 classes
+  buzzer: not among selected 11 classes
+unknown_policy: ambiguous_review_required
+geometry_policy: strict_positive_finite_within_original_image
