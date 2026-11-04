@@ -1,0 +1,32 @@
+run_id: v3-qlora-engineering-smoke-20261104
+purpose: engineering_only_not_performance_or_best_model
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+  task_type: CAUSAL_LM
+training:
+  seed: 42
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 0.0001
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  save_steps: 5
+  max_val_batches: null
+data:
+  max_length: 1536
+  image_max_pixels: 200704
+  max_objects: null
+  max_response_len: null
+bounds:
+  total_optimizer_updates: 12
+  stop_first_process_at_step: 10
+  resume_to_step: 12
+  total_wall_seconds: 900
+  max_attempts: 1
+  no_automatic_precision_fallback: true

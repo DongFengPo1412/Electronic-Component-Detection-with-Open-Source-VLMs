@@ -180,3 +180,13 @@ DeepSeek-VL-1.3B-chat 使用项目明确要求的 `yxyx_norm1000` 数值回答�
 使用 `scripts/rebuild_semantic_dataset.py` 及 `configs/semantic_policy_v3.yaml` 重建，`scripts/audit_semantic_v3.py` 独立检查全部XML双向覆盖和SFT像素/监督来源；已有输出目录不会覆盖。
 新Train/Val SFT为451/71条，不生成Test SFT；测试集修正连接器仍只在测试GT中。新的冻结协议另存数据目录的 `frozen_protocol_v3.yaml`，旧冻结协议不覆盖；正式推理须显式 `--protocol <V3协议>`，训练须显式 `--splits-path <V3划分>` 与新SFT路径。
 注意训练87条、验证17条回答超过1024 tokens，均保留完整监督而没有截断；数据审计通过不意味着整套样本可直接在8GB显卡上训练。下一轮必须明确长度预算与样本覆盖。本轮不训练。
+
+
+### V3 训练准备与工程试运行（2026-11-04）
+本地数据入口见 `configs/data_v3.yaml`，包括原V3、派生SFT和经过逐文件SHA-256核验的长期恢复清单。快照保留原路径引用；恢复应按清单复制缺失文件并核验，遇冲突停止，不移动/删除缓存。原V3完整SFT保持不变。
+`scripts/audit_training_budget.py --sft <目录> --model <本地Qwen目录> --output <新的任务缓存目录> --sequence-budget 1536` 使用实际processor/collator统计完整输入、完整回答与覆盖，不加载模型权重。不要把推理max_new_tokens当作训练长度。
+新增512空间切片后，保留完整回答且联合长度≤1536的派生集合为Train 1637条/4525唯一目标，Val 237条/650唯一目标；覆盖21/4物理板和全部11类。它不是完整V3监督：训练仍缺519个、验证缺109个唯一目标。原V3总量仍为5044/759/791。
+`configs/lora_v3_smoke.yaml` 仅用于工程验证：NF4 4-bit、microbatch=1、梯度累积2、总12更新步（先停10，再从checkpoint-10恢复至12）；`--max-steps` 是固定调度器总步数，`--stop-after-step` 仅提前停止，不改变学习率曲线。输出目录须新建，恢复从旧目录读、向新目录写。
+实际24条Train、4条Val试运行完成12步，验证了反向传播、LoRA更新和检查点恢复，分配显存峰值6244.60 MiB。此结果不证明检测质量改善，也不证明全量/长序列训练安全；显存余量很小。源程序随后修正恢复时将final误标best的后备逻辑，并通过微型真实训练循环回归；旧试运行误命名目录已标记，权重未改写。最后权重不再自动提升为best。
+本机共享环境huggingface-hub 2.4.0与transformers 4.46.3不兼容。本轮只在任务缓存dependency-overlay安装hub 0.36.2，并通过PYTHONPATH使用；没有修改共享环境。QLoRA实际版本：torch 2.5.1+cu121、transformers 4.46.3、peft 0.21.2、bitsandbytes 0.50.2。后续执行前应检查环境，不应默认为全局环境已修好。
+完整结果和运行命令见 `C:/Users/Liu/.codex/artifacts/pcb-train-prep-20261104/执行报告.md`；不使用测试集、没有新检测性能成绩、没有推送远程。

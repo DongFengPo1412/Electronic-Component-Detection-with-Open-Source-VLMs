@@ -1,0 +1,10 @@
+version: v3-training-paths-1
+project_root: C:/workspace/Electronic-Component-Detection-with-Open-Source-VLMs
+canonical_dataset: C:/Users/Liu/.codex/cache/tasks/pcb-v3-20261104/annotations_v3_semantic
+complete_sft: C:/Users/Liu/.codex/cache/tasks/pcb-v3-20261104/sft_v3_semantic
+preservation_snapshot: C:/Users/Liu/.codex/artifacts/pcb-v3-preservation-20261104/snapshot
+restore_manifest: C:/Users/Liu/.codex/artifacts/pcb-v3-preservation-20261104/restore_manifest.json
+restore_rule: Copy only missing files to explicit original paths after SHA-256 check; stop on conflicts. Never delete or move source cache.
+training_task_root: C:/Users/Liu/.codex/cache/tasks/pcb-train-prep-20261104
+derived_complete_budget_sft: C:/Users/Liu/.codex/cache/tasks/pcb-train-prep-20261104/derived_budget1536
+derived_restore_manifest: C:/Users/Liu/.codex/artifacts/pcb-train-prep-20261104/derived-restore-manifest.json

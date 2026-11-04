@@ -29,17 +29,18 @@ from qwen_vl_utils import process_vision_info
 
 
 class PCBComponentSFTDataset(Dataset):
-    def __init__(self, data_file: str, processor, max_pixels: int = 301056, max_objects: int = 60, max_response_len: int = 3500):
+    def __init__(self, data_file: str, processor, max_pixels: int = 301056, max_objects: int = 60, max_response_len: int = 3500, max_sequence_length: Optional[int] = None):
         with open(data_file, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
         self.processor = processor
         self.max_pixels = max_pixels
+        self.max_sequence_length = max_sequence_length
 
         # Filter out extreme whole-board samples with 600+ objects that cause sequence explosion
         # Keep high-resolution tile samples with detailed SMT components
         self.data = [
             d for d in raw_data
-            if d.get("num_objects", 0) <= max_objects and len(d.get("conversations", [{}, {}])[1].get("value", "")) <= max_response_len
+            if (max_objects is None or d.get("num_objects", 0) <= max_objects) and (max_response_len is None or len(d.get("conversations", [{}, {}])[1].get("value", "")) <= max_response_len)
         ]
         print(f"Loaded {len(self.data)}/{len(raw_data)} samples (max_objects<={max_objects}, max_chars<={max_response_len}).")
 
@@ -84,6 +85,8 @@ class PCBComponentSFTDataset(Dataset):
         )
 
         input_ids = inputs["input_ids"][0]
+        if self.max_sequence_length is not None and len(input_ids) > self.max_sequence_length:
+            raise ValueError(f"Sample {item.get('id', idx)} exceeds training sequence budget: {len(input_ids)} > {self.max_sequence_length}; labels are never truncated")
         attention_mask = inputs["attention_mask"][0]
         pixel_values = inputs["pixel_values"].to(torch.bfloat16)
         image_grid_thw = inputs["image_grid_thw"]
@@ -116,7 +119,7 @@ class PCBComponentSFTDataset(Dataset):
         }
 
 
-def collate_fn(batch):
+def collate_fn(batch, pad_token_id=151643):
     # Dynamic padding
     input_ids = [b["input_ids"] for b in batch]
     labels = [b["labels"] for b in batch]
@@ -128,7 +131,7 @@ def collate_fn(batch):
     padded_labels = []
     padded_attention_mask = []
 
-    pad_token_id = 151643 # default Qwen pad token or eos
+    # pad_token_id is supplied from the actual processor tokenizer in training.
 
     for ids, labs, att in zip(input_ids, labels, attention_mask):
         pad_len = max_len - len(ids)
@@ -197,8 +200,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-qlora", action="store_true", help="Use 4-bit BitsAndBytes QLoRA to save VRAM.")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Directory containing checkpoint to resume from (e.g. checkpoint-100).")
+    parser.add_argument("--stop-after-step", type=int, default=None, help="Bounded smoke stop, without changing scheduler horizon")
     args = parser.parse_args()
+    effective_stop = min(args.max_steps, args.stop_after_step or args.max_steps)
 
+    if os.path.isdir(args.output_dir) and os.listdir(args.output_dir):
+        raise FileExistsError("Use a fresh output directory; resume weights/state may be read from a different existing run")
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load Config
@@ -234,11 +241,17 @@ def main():
     if args.val_data_file:
         with open(args.val_data_file, encoding="utf-8") as stream:
             validate_samples(json.load(stream), "val", splits_file)
+    cfg["training_run"] = {"seed": cfg["training"].get("seed", 42), "scheduler_horizon": args.max_steps, "use_qlora": args.use_qlora, "max_sequence_length": cfg["data"].get("max_length"), "actual_data_file": args.data_file}
     cfg["provenance"] = {"train_sft_path": os.path.abspath(args.data_file),
         "base_model_sha256": model_identity(args.model_path),
         "git_commit": code_identity(), "source_tree_sha256": source_identity(), "dependencies": dependencies()}
     if args.resume_from_checkpoint:
-        verify_adapter(args.resume_from_checkpoint, splits_file, args.model_path)
+        previous = verify_adapter(args.resume_from_checkpoint, splits_file, args.model_path)
+        if previous['train_sft_sha256'] != train_sft_sha256:
+            raise ValueError('Resume requires the exact original training SFT')
+        for key in ('lora', 'training', 'data', 'training_run'):
+            if previous['training_config'].get(key) != cfg.get(key):
+                raise ValueError(f'Resume config mismatch: {key}')
 
     print(f"=== Qwen2-VL-2B LoRA SFT Training ===")
     print(f"Base Model:    {args.model_path}")
@@ -276,17 +289,20 @@ def main():
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             args.model_path,
             quantization_config=bnb_cfg,
-            device_map="auto"
+            torch_dtype=torch.bfloat16,
+            device_map={"": args.device},
+            local_files_only=True
         )
         model = prepare_model_for_kbit_training(model)
         print("Loaded Qwen2-VL with 4-bit NormalFloat4 (QLoRA).")
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             args.model_path,
+            local_files_only=True,
             torch_dtype=torch.bfloat16,
             device_map=args.device if args.device == "cuda" else None
         )
-    processor = AutoProcessor.from_pretrained(args.model_path)
+    processor = AutoProcessor.from_pretrained(args.model_path, local_files_only=True)
 
     # Enable Gradient Checkpointing
     if cfg["training"].get("gradient_checkpointing", True):
@@ -299,6 +315,13 @@ def main():
             raise FileNotFoundError(f"Checkpoint directory not found: {args.resume_from_checkpoint}")
         print(f"Resuming LoRA model weights from: {args.resume_from_checkpoint}")
         model = PeftModel.from_pretrained(model, args.resume_from_checkpoint, is_trainable=True)
+        from safetensors.torch import load_file
+        from peft import get_peft_model_state_dict
+        saved_adapter = load_file(os.path.join(args.resume_from_checkpoint, 'adapter_model.safetensors'))
+        loaded_adapter = get_peft_model_state_dict(model)
+        if saved_adapter.keys() != loaded_adapter.keys() or not all(torch.equal(value.cpu(),loaded_adapter[key].detach().cpu()) for key,value in saved_adapter.items()):
+            raise ValueError('Reloaded adapter tensors do not match saved checkpoint')
+        print('Resume adapter tensor readback: exact match.')
     else:
         lora_cfg = cfg["lora"]
         peft_config = LoraConfig(
@@ -310,10 +333,11 @@ def main():
             bias=lora_cfg.get("bias", "none")
         )
         model = get_peft_model(model, peft_config)
+    model.config.use_cache = False
     model.print_trainable_parameters()
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    all_params = sum(p.numel() for p in model.parameters())
+    _, all_params = model.get_nb_trainable_parameters()  # Counts logical 4-bit parameters, not packed storage elements.
     print(f"Trainable params: {trainable_params:,} / {all_params:,} ({100 * trainable_params / all_params:.4f}%)")
 
     # Locate base weight and lora weight for parameter isolation verification
@@ -340,7 +364,10 @@ def main():
     dataset = PCBComponentSFTDataset(
         data_file=args.data_file,
         processor=processor,
-        max_pixels=cfg["data"].get("image_max_pixels", 301056)
+        max_pixels=cfg["data"].get("image_max_pixels", 301056),
+        max_objects=cfg["data"].get("max_objects", 60),
+        max_response_len=cfg["data"].get("max_response_len", 3500),
+        max_sequence_length=cfg["data"].get("max_length")
     )
     batch_size = cfg["training"].get("per_device_train_batch_size", 1)
     batch_sampler = ResumableBatchSampler(
@@ -353,7 +380,7 @@ def main():
     dataloader = DataLoader(
         dataset,
         batch_sampler=batch_sampler,
-        collate_fn=collate_fn
+        collate_fn=__import__("functools").partial(collate_fn, pad_token_id=processor.tokenizer.pad_token_id)
     )
 
     val_loader = None
@@ -361,19 +388,22 @@ def main():
         val_dataset = PCBComponentSFTDataset(
             data_file=args.val_data_file,
             processor=processor,
-            max_pixels=cfg["data"].get("image_max_pixels", 301056)
+            max_pixels=cfg["data"].get("image_max_pixels", 301056),
+            max_objects=cfg["data"].get("max_objects", 60),
+            max_response_len=cfg["data"].get("max_response_len", 3500),
+            max_sequence_length=cfg["data"].get("max_length")
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=1,
             shuffle=False,
-            collate_fn=collate_fn
+            collate_fn=__import__("functools").partial(collate_fn, pad_token_id=processor.tokenizer.pad_token_id)
         )
         print(f"Validation dataset loaded: {len(val_dataset)} samples.")
 
     # Optimizer & Scheduler
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [p for p in model.parameters() if p.requires_grad],
         lr=float(cfg["training"].get("learning_rate", 1.0e-4)),
         weight_decay=float(cfg["training"].get("weight_decay", 0.01))
     )
@@ -391,6 +421,7 @@ def main():
     total_loss = 0.0
     history = []
     best_val_loss = float("inf")
+    best_adapter_source = None
     total_batches_processed = 0
     start_epoch = 0
     start_batch_in_epoch = 0
@@ -398,11 +429,17 @@ def main():
 
     if args.resume_from_checkpoint:
         state_file = os.path.join(args.resume_from_checkpoint, "trainer_state.pt")
+        if not os.path.isfile(state_file):
+            raise FileNotFoundError("Exact resume requires trainer_state.pt")
         if os.path.exists(state_file):
             print(f"Loading trainer state from {state_file}...")
-            state = torch.load(state_file, map_location="cpu")
+            state = torch.load(state_file, map_location="cpu", weights_only=False)
+            required_state = ('step','optimizer_state_dict','scheduler_state_dict','rng_state','epoch','batch_in_epoch','epoch_indices','total_batches_processed','python_rng_state','numpy_rng_state')
+            if any(k not in state for k in required_state):
+                raise ValueError('Incomplete resume state; refusing partial recovery')
             step = state.get("step", 0)
             best_val_loss = state.get("best_val_loss", float("inf"))
+            best_adapter_source = state.get("best_adapter_source")
             total_batches_processed = state.get("total_batches_processed", step * grad_accum_steps)
             start_epoch = state.get("epoch", 0)
             start_batch_in_epoch = state.get("batch_in_epoch", 0)
@@ -415,12 +452,14 @@ def main():
                 print("Restored learning rate scheduler state.")
             if "rng_state" in state and state["rng_state"] is not None:
                 torch.set_rng_state(state["rng_state"].cpu())
+                if "python_rng_state" in state: random.setstate(state["python_rng_state"])
+                if "numpy_rng_state" in state: np.random.set_state(state["numpy_rng_state"])
                 print("Restored PyTorch CPU RNG state.")
             if "cuda_rng_state" in state and state["cuda_rng_state"] is not None and torch.cuda.is_available():
                 torch.cuda.set_rng_state(state["cuda_rng_state"].cpu())
                 print("Restored CUDA RNG state.")
 
-            history_file = os.path.join(args.output_dir, "training_history.json")
+            history_file = os.path.join(os.path.dirname(args.resume_from_checkpoint), "training_history.json")
             if os.path.exists(history_file):
                 try:
                     with open(history_file, "r", encoding="utf-8") as f:
@@ -431,12 +470,14 @@ def main():
         else:
             print(f"Warning: {state_file} not found. Resumed LoRA weights only; optimizer starts fresh.")
 
+    start_step = step
     t_start = time.time()
     print(f"\nStarting training loop at step {step}/{args.max_steps} (resuming epoch {start_epoch}, batch {start_batch_in_epoch}, batches done: {total_batches_processed})...")
     optimizer.zero_grad()
 
     global_batch_counter = total_batches_processed
     accum_counter = 0
+    update_started = time.time()
 
     for epoch in range(start_epoch, 100):
         if epoch == start_epoch and start_batch_in_epoch > 0:
@@ -455,6 +496,8 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             loss = loss / grad_accum_steps
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite loss; refusing training update")
             loss.backward()
 
             total_loss += loss.item() * grad_accum_steps
@@ -485,7 +528,10 @@ def main():
                     print(f"[Stage 13 Verification] LoRA ({sample_lora_name}) grad nonzero: {lora_grad_nonzero}")
                     print(f"[Stage 13 Verification] Base model ({sample_base_name}) frozen (grad is None): {base_grad_is_none}")
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["training"].get("max_grad_norm", 1.0)))
+                # Clip once below and log the true pre-clip norm.
+                grad_norm = torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], float(cfg["training"].get("max_grad_norm", 1.0)))
+                if not torch.isfinite(grad_norm):
+                    raise FloatingPointError("Nonfinite gradient norm")
                 optimizer.step()
                 scheduler.step()
 
@@ -506,7 +552,11 @@ def main():
                 peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
 
                 record = {
+                    "optimizer_steps_this_process": step - (start_step if "start_step" in locals() else 0),
                     "step": step,
+                    "gradient_norm": float(grad_norm),
+                    "step_wall_s": round(time.time() - update_started, 3),
+                    "sequence_tokens": int(batch["input_ids"].shape[1]),
                     "loss": round(step_loss, 4),
                     "lr": round(curr_lr, 7),
                     "peak_vram_mb": round(peak_vram, 2),
@@ -530,14 +580,17 @@ def main():
                     "epoch_indices": save_perm,
                     "total_batches_processed": global_batch_counter,
                     "best_val_loss": best_val_loss,
+                    "best_adapter_source": best_adapter_source,
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                     "rng_state": torch.get_rng_state(),
+                    "python_rng_state": random.getstate(),
+                    "numpy_rng_state": np.random.get_state(),
                     "cuda_rng_state": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
                 }
 
                 # Validation evaluation across full validation set
-                if val_loader is not None and (step % args.eval_steps == 0 or step >= args.max_steps):
+                if val_loader is not None and (step % args.eval_steps == 0 or step >= effective_stop):
                     model.eval()
                     val_loss_acc = 0.0
                     val_batches = 0
@@ -560,7 +613,9 @@ def main():
                         if mean_val_loss < best_val_loss:
                             best_val_loss = mean_val_loss
                             best_dir = os.path.join(args.output_dir, "best_adapter")
+                            best_adapter_source = os.path.abspath(best_dir)
                             trainer_state_payload["best_val_loss"] = best_val_loss
+                            trainer_state_payload["best_adapter_source"] = best_adapter_source
                             save_adapter_with_provenance_metadata(
                                 best_dir, model, processor, args.model_path, split_sha256,
                                 train_boards, train_sft_sha256, step, cfg, trainer_state_payload
@@ -573,8 +628,9 @@ def main():
                     print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB | Elapsed: {record['time_elapsed_s']}s", flush=True)
 
                 history.append(record)
+                update_started = time.time()
 
-                if step % cfg["training"].get("save_steps", 10) == 0 or step >= args.max_steps:
+                if step % cfg["training"].get("save_steps", 10) == 0 or step >= effective_stop:
                     save_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
                     save_adapter_with_provenance_metadata(
                         save_dir, model, processor, args.model_path, split_sha256,
@@ -582,10 +638,10 @@ def main():
                     )
                     print(f"Saved LoRA checkpoint and resume state to {save_dir} (epoch {save_epoch}, batch_offset {save_batch_offset})", flush=True)
 
-                if step >= args.max_steps:
+                if step >= effective_stop:
                     break
 
-        if step >= args.max_steps:
+        if step >= effective_stop:
             break
 
     # Save verification report if present
@@ -603,17 +659,12 @@ def main():
     final_dir = os.path.join(args.output_dir, "final_adapter")
     save_adapter_with_provenance_metadata(
         final_dir, model, processor, args.model_path, split_sha256,
-        train_boards, train_sft_sha256, step, cfg
+        train_boards, train_sft_sha256, step, cfg, trainer_state_payload
     )
     print(f"\nFinal adapter weights and metadata saved to {final_dir}")
 
-    # If no val data or best_adapter wasn't created, copy final as best
-    best_dir = os.path.join(args.output_dir, "best_adapter")
-    if not os.path.exists(best_dir):
-        save_adapter_with_provenance_metadata(
-            best_dir, model, processor, args.model_path, split_sha256,
-            train_boards, train_sft_sha256, step, cfg
-        )
+    # A final checkpoint is never promoted to best without a measured improvement.
+    # A resumed run can legitimately have no new local best_adapter directory.
 
     log_file = os.path.join(args.output_dir, "training_history.json")
     with open(log_file, "w", encoding="utf-8") as f:
@@ -625,7 +676,13 @@ def main():
         json.dump({
             "stage": 14,
             "total_steps": step,
-            "epochs": round(step * grad_accum_steps / len(dataset), 2),
+            "epochs": round(global_batch_counter / len(dataset), 2),
+            "actual_sample_ids": [r["id"] for r in dataset.data],
+            "validation_sample_ids": [r["id"] for r in val_dataset.data] if val_loader else [],
+            "use_qlora": args.use_qlora,
+            "scheduler_horizon": args.max_steps,
+            "start_step": start_step,
+            "best_adapter_source": best_adapter_source,
             "best_val_loss": round(best_val_loss, 4) if best_val_loss != float("inf") else None,
             "peak_vram_mb": round(torch.cuda.max_memory_allocated() / (1024 * 1024), 2) if torch.cuda.is_available() else 0.0,
             "total_time_s": round(time.time() - t_start, 2),
