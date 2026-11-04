@@ -26,7 +26,7 @@ from pcb_vlm.models.deepseek_adapter import DeepSeekAdapter
 
 def run_coordinate_protocol_audit():
     print("=" * 70)
-    print("AUDIT: EMPIRICAL COORDINATE PROTOCOL & PROBE VERIFICATION")
+    print("AUDIT: HISTORICAL TEXT REPLAY (legacy=True; NOT fresh model inference)")
     print("=" * 70)
 
     adapter = object.__new__(QwenAdapter)
@@ -38,7 +38,7 @@ def run_coordinate_protocol_audit():
     print(f"\n[Probe 1 - Top-Right Rectangle] Geometry: {img_w}x{img_h}, GT: {gt_box_1}")
     print(f"Model Real Output: '{probe_output_1}'")
 
-    parsed_1, status_1, detail_1, trunc_1 = adapter.parse_grounding_output_with_status(probe_output_1, img_w, img_h)
+    parsed_1, status_1, detail_1, trunc_1 = adapter.parse_grounding_output_with_status(probe_output_1, img_w, img_h, legacy=True)
     assert status_1 == "success", f"Probe 1 parse failed: {status_1}, {detail_1}"
     assert len(parsed_1) == 1
     assert trunc_1 is False, "Probe 1 should not be truncated"
@@ -51,7 +51,7 @@ def run_coordinate_protocol_audit():
     # 2. Real Probe 2: Normalized Float Array [0.6, 0.23, 0.8, 0.45]
     probe_output_2 = "[0.6, 0.23, 0.8, 0.45]"
     print(f"[Probe 2 - Normalized Floats] Model Real Output: '{probe_output_2}'")
-    parsed_2, status_2, detail_2, trunc_2 = adapter.parse_grounding_output_with_status(probe_output_2, img_w, img_h)
+    parsed_2, status_2, detail_2, trunc_2 = adapter.parse_grounding_output_with_status(probe_output_2, img_w, img_h, legacy=True)
     assert status_2 == "success", f"Probe 2 parse failed: {status_2}, {detail_2}"
     assert len(parsed_2) == 1
     assert trunc_2 is False, "Probe 2 should not be truncated"
@@ -81,7 +81,7 @@ def run_coordinate_protocol_audit():
     print("  -> PASS: Dialogue text correctly produces 0 boxes without artificial fabrication.\n")
 
     print("=" * 70)
-    print("ALL EMPIRICAL PROTOCOL AND PROBE AUDITS PASSED.")
+    print("HISTORICAL TEXT REPLAY ASSERTIONS PASSED (no new model inference).")
     print("=" * 70)
 
 

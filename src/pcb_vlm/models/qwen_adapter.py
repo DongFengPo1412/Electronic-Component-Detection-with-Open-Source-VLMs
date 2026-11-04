@@ -17,6 +17,7 @@ import torch
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from peft import PeftModel
 
+from pcb_vlm.geometry.coordinate_protocol import parse_response, generation_finished
 from pcb_vlm.config import get_canonical_categories
 DEFAULT_PCB_CLASSES = get_canonical_categories()
 
@@ -39,6 +40,8 @@ class QwenAdapter:
 
         requested = model_path or model_id or "Qwen/Qwen2-VL-2B-Instruct"
         self.requested_model = requested
+        if model_path and model_path not in known_aliases and not os.path.isdir(model_path):
+            raise FileNotFoundError(model_path)
 
         if model_path and os.path.exists(model_path):
             target_path = model_path
@@ -74,13 +77,15 @@ class QwenAdapter:
         t0 = time.time()
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             target_path,
+            local_files_only=True,
             torch_dtype=torch_dtype,
             device_map=device if device == "cuda" else None
         )
         if device != "cuda":
             self.model.to(device)
 
-        self.processor = AutoProcessor.from_pretrained(target_path)
+        self.model.eval()
+        self.processor = AutoProcessor.from_pretrained(target_path, local_files_only=True)
         load_time = time.time() - t0
         print(f"Qwen2-VL successfully loaded in {load_time:.2f}s.")
 
@@ -105,7 +110,7 @@ class QwenAdapter:
             f"If no target components are visible, output 'None'."
         )
 
-    def parse_grounding_output_with_status(self, text: str, img_w: int, img_h: int) -> Tuple[List[Dict[str, Any]], str, str, bool]:
+    def parse_legacy_grounding_output_with_status(self, text: str, img_w: int, img_h: int) -> Tuple[List[Dict[str, Any]], str, str, bool]:
         """Parse Qwen2-VL grounding tokens to pixel xyxy, returning explicit status and truncation flags.
         Canonical coordinate order: (xmin, ymin), (xmax, ymax).
         """
@@ -288,8 +293,18 @@ class QwenAdapter:
 
         return filtered_detected, status, status_detail, is_syntax_truncated
 
-    def parse_grounding_output(self, text: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-        return self.parse_grounding_output_with_status(text, img_w, img_h)[0]
+    def parse_grounding_output_with_status(self, text, img_w, img_h, coordinate_protocol="xyxy_norm1000", legacy=False):
+        if legacy:
+            self.last_parse_audit = {"protocol": "legacy_auto_heuristic", "formal_eligible": False}
+            return self.parse_legacy_grounding_output_with_status(text, img_w, img_h)
+        result = parse_response(text, img_w, img_h, coordinate_protocol, allow_qwen_tokens=True)
+        self.last_parse_audit = result['audit']
+        self.last_parse_truncated = result['truncated']
+        values = (result['objects'], result['status'], result['detail'])
+        return values + (result['truncated'],) if True else values
+
+    def parse_grounding_output(self, text, img_w, img_h, coordinate_protocol="xyxy_norm1000", legacy=False):
+        return self.parse_grounding_output_with_status(text, img_w, img_h, coordinate_protocol, legacy)[0]
 
     def predict_image(
         self,
@@ -310,6 +325,8 @@ class QwenAdapter:
         w, h = pil_img.size
 
         if prompt is None:
+            if kwargs.get('coordinate_protocol', 'xyxy_norm1000') != 'xyxy_norm1000':
+                raise ValueError('A nondefault coordinate protocol requires an explicit matching prompt')
             prompt = self.build_prompt()
 
         messages = [
@@ -359,13 +376,14 @@ class QwenAdapter:
         input_len = inputs.input_ids.shape[1]
         generated_ids = outputs[0][input_len:]
         generated_tokens = int(len(generated_ids))
-        is_token_limit_reached = (generated_tokens >= max_new_tokens)
-        finish_reason = "length" if is_token_limit_reached else "eos_token"
+        has_eos = generation_finished(generated_ids.tolist(), self.model.generation_config.eos_token_id)
+        is_token_limit_reached = (generated_tokens >= max_new_tokens and not has_eos)
+        finish_reason = "eos_token" if has_eos else ("length" if is_token_limit_reached else "unknown")
 
         raw_output = self.processor.decode(generated_ids, skip_special_tokens=False)
 
-        detected_objects, status, status_detail, is_syntax_truncated = self.parse_grounding_output_with_status(raw_output, w, h)
-        has_normal_eos = ("<|im_end|>" in raw_output) or (not is_token_limit_reached and not is_syntax_truncated)
+        detected_objects, status, status_detail, is_syntax_truncated = self.parse_grounding_output_with_status(raw_output, w, h, kwargs.get("coordinate_protocol", "xyxy_norm1000"))
+        has_normal_eos = has_eos
         is_truncated = is_token_limit_reached or is_syntax_truncated
         truncation_reason = None
         if is_token_limit_reached and not ("<|im_end|>" in raw_output):
@@ -389,11 +407,17 @@ class QwenAdapter:
             "prompt": prompt,
             "raw_output": raw_output,
             "objects": detected_objects,
+            "parse_audit": self.last_parse_audit,
+            "coordinate_protocol": kwargs.get("coordinate_protocol", "xyxy_norm1000"),
+            "coordinate_reference": "input_image_or_tile",
+            "prompt_sha256": __import__("hashlib").sha256(prompt.encode()).hexdigest(),
             "num_detected": len(detected_objects),
             "status": status,
             "status_detail": status_detail,
             "is_truncated": is_truncated,
             "is_syntax_truncated": is_syntax_truncated,
+            "has_normal_eos": has_normal_eos,
+            "processed_image_grid_thw": inputs.image_grid_thw.tolist(),
             "generated_tokens": generated_tokens,
             "token_budget": max_new_tokens,
             "finish_reason": finish_reason,

@@ -150,7 +150,10 @@ def load_protocol(path=None):
     data['split_sha256'] = sha256(split_path)
     data['generation'].setdefault('max_pixels', 602112)
     data['generation'].setdefault('repetition_penalty', 1.25)
-    data['coordinate_protocol'] = 'xyxy_norm1000_xfirst'
+    data.setdefault('coordinate_protocols', {'qwen': 'xyxy_norm1000', 'deepseek': 'yxyx_norm1000'})
+    from pcb_vlm.geometry.coordinate_protocol import PROTOCOLS
+    if any(value not in PROTOCOLS for value in data['coordinate_protocols'].values()):
+        raise ValueError('Unsupported explicit coordinate protocol')
     data.pop('final_protocol_hash', None)
     data['final_protocol_hash'] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
     return data

@@ -85,7 +85,7 @@ class TestQwenAdapterGeometry(unittest.TestCase):
         probe_text = "(652,95),(916,375)"
         img_w, img_h = 800, 400
         gt_box = [520.0, 40.0, 740.0, 140.0]
-        parsed = adapter.parse_grounding_output(probe_text, img_w, img_h)
+        parsed = adapter.parse_grounding_output(probe_text, img_w, img_h, legacy=True)
         self.assertEqual(len(parsed), 1)
         iou = compute_iou(parsed[0]["bbox_xyxy"], gt_box)
         self.assertGreater(iou, 0.85)
@@ -95,7 +95,7 @@ class TestQwenAdapterGeometry(unittest.TestCase):
         adapter = object.__new__(QwenAdapter)
         probe_text = "[0.6, 0.23, 0.8, 0.45]"
         img_w, img_h = 800, 400
-        parsed = adapter.parse_grounding_output(probe_text, img_w, img_h)
+        parsed = adapter.parse_grounding_output(probe_text, img_w, img_h, legacy=True)
         self.assertEqual(len(parsed), 1)
         # x1 = 0.6 * 800 = 480, y1 = 0.23 * 400 = 92, x2 = 0.8 * 800 = 640, y2 = 0.45 * 400 = 180
         self.assertEqual(parsed[0]["bbox_xyxy"], [480.0, 92.0, 640.0, 180.0])
@@ -103,7 +103,7 @@ class TestQwenAdapterGeometry(unittest.TestCase):
     def test_parsing_status_reporting(self):
         adapter = object.__new__(QwenAdapter)
         # 1. Success
-        boxes, status, detail, trunc = adapter.parse_grounding_output_with_status("[0.1, 0.2, 0.5, 0.6]", 1000, 1000)
+        boxes, status, detail, trunc = adapter.parse_grounding_output_with_status("[0.1, 0.2, 0.5, 0.6]", 1000, 1000, legacy=True)
         self.assertEqual(status, "success")
         self.assertEqual(len(boxes), 1)
         self.assertFalse(trunc)
@@ -178,7 +178,7 @@ class TestQwenAdapterGeometry(unittest.TestCase):
     def test_bare_box_labeled_unknown(self):
         adapter = object.__new__(QwenAdapter)
         text = "<|box_start|>(100,200),(300,400)<|box_end|>"
-        boxes, status, detail, trunc = adapter.parse_grounding_output_with_status(text, 1000, 1000)
+        boxes, status, detail, trunc = adapter.parse_grounding_output_with_status(text, 1000, 1000, legacy=True)
         self.assertEqual(len(boxes), 1)
         self.assertEqual(boxes[0]["label"], "unknown", "Bare boxes without category must be preserved as 'unknown', not guessed as a category")
 

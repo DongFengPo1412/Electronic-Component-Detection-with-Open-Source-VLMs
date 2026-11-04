@@ -29,23 +29,10 @@ def qwen_norm_to_xyxy(
     By default uses canonical x-first: norm_box = (xmin, ymin, xmax, ymax).
     If axis_order == 'yxyx', interprets as (ymin, xmin, ymax, xmax).
     """
-    if axis_order == "yxyx":
-        ymin, xmin, ymax, xmax = norm_box
-    else:
-        xmin, ymin, xmax, ymax = norm_box
-
-    x1 = (xmin / 1000.0) * img_w
-    y1 = (ymin / 1000.0) * img_h
-    x2 = (xmax / 1000.0) * img_w
-    y2 = (ymax / 1000.0) * img_h
-
-    # Clip to valid image boundary
-    x1 = max(0.0, min(float(img_w), x1))
-    y1 = max(0.0, min(float(img_h), y1))
-    x2 = max(0.0, min(float(img_w), x2))
-    y2 = max(0.0, min(float(img_h), y2))
-
-    return [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+    if axis_order not in ('xyxy', 'yxyx'):
+        raise ValueError(f'Unsupported axis order: {axis_order}')
+    from .coordinate_protocol import to_pixels
+    return to_pixels(norm_box, img_w, img_h, axis_order + '_norm1000')
 
 
 def xyxy_to_qwen_norm(
@@ -59,15 +46,13 @@ def xyxy_to_qwen_norm(
     By default returns canonical x-first: (xmin, ymin, xmax, ymax).
     If axis_order == 'yxyx', returns (ymin, xmin, ymax, xmax).
     """
-    x1, y1, x2, y2 = xyxy
-    xmin = int(round(max(0.0, min(float(img_w), x1)) / img_w * 1000))
-    ymin = int(round(max(0.0, min(float(img_h), y1)) / img_h * 1000))
-    xmax = int(round(max(0.0, min(float(img_w), x2)) / img_w * 1000))
-    ymax = int(round(max(0.0, min(float(img_h), y2)) / img_h * 1000))
-
-    if axis_order == "yxyx":
-        return (ymin, xmin, ymax, xmax)
-    return (xmin, ymin, xmax, ymax)
+    if axis_order not in ('xyxy', 'yxyx'):
+        raise ValueError(f'Unsupported axis order: {axis_order}')
+    from .coordinate_protocol import to_pixels
+    x1, y1, x2, y2 = to_pixels(xyxy, img_w, img_h, 'xyxy_pixels')
+    norm = (int(round(x1/img_w*1000)), int(round(y1/img_h*1000)),
+            int(round(x2/img_w*1000)), int(round(y2/img_h*1000)))
+    return norm if axis_order == 'xyxy' else (norm[1], norm[0], norm[3], norm[2])
 
 
 def compute_iou(box1: List[float], box2: List[float]) -> float:

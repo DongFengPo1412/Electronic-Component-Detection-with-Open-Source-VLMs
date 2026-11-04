@@ -16,6 +16,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from PIL import Image
 import torch
 
+from pcb_vlm.geometry.coordinate_protocol import parse_response, generation_finished
 from pcb_vlm.config import get_canonical_categories
 DEFAULT_PCB_CLASSES = get_canonical_categories()
 
@@ -36,9 +37,13 @@ class DeepSeekAdapter:
         }
         requested = model_path or model_id or "deepseek-ai/deepseek-vl-1.3b-chat"
         self.requested_model = requested
+        if model_path and model_path not in known_aliases and not os.path.isdir(model_path):
+            raise FileNotFoundError(model_path)
 
         if model_path and os.path.exists(model_path):
             target_path = model_path
+        elif model_id and os.path.isdir(model_id):
+            target_path = model_id
         elif model_id and model_id in known_aliases:
             target_path = known_aliases[model_id]
         elif requested in known_aliases:
@@ -68,9 +73,10 @@ class DeepSeekAdapter:
         print(f"Loading DeepSeek-VL from {model_path} (requested: {self.requested_model}) on {self.device}...")
         t0 = time.time()
         from deepseek_vl.models import VLChatProcessor, MultiModalityCausalLM
-        self.processor = VLChatProcessor.from_pretrained(model_path)
+        self.processor = VLChatProcessor.from_pretrained(model_path, local_files_only=True)
         self.model = MultiModalityCausalLM.from_pretrained(
             model_path,
+            local_files_only=True,
             torch_dtype=self.torch_dtype,
             device_map=self.device if self.device == "cuda" else None
         )
@@ -78,6 +84,7 @@ class DeepSeekAdapter:
         if self.device != "cuda" and hasattr(self.model, "to"):
             self.model.to(self.device)
 
+        self.model.eval()
         load_time = time.time() - t0
         print(f"DeepSeek-VL successfully loaded in {load_time:.2f}s.")
 
@@ -92,7 +99,7 @@ class DeepSeekAdapter:
             f"If no target components are visible, output 'None'."
         )
 
-    def parse_grounding_output_with_status(self, text: str, img_w: int, img_h: int) -> Tuple[List[Dict[str, Any]], str, str]:
+    def parse_legacy_grounding_output_with_status(self, text: str, img_w: int, img_h: int) -> Tuple[List[Dict[str, Any]], str, str]:
         """Parse grounding tokens or coordinate tuples to pixel xyxy, returning explicit status."""
         detected = []
 
@@ -174,8 +181,18 @@ class DeepSeekAdapter:
 
         return filtered_detected, status, status_detail
 
-    def parse_grounding_output(self, text: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-        return self.parse_grounding_output_with_status(text, img_w, img_h)[0]
+    def parse_grounding_output_with_status(self, text, img_w, img_h, coordinate_protocol="yxyx_norm1000", legacy=False):
+        if legacy:
+            self.last_parse_audit = {"protocol": "legacy_auto_heuristic", "formal_eligible": False}
+            return self.parse_legacy_grounding_output_with_status(text, img_w, img_h)
+        result = parse_response(text, img_w, img_h, coordinate_protocol, allow_qwen_tokens=False)
+        self.last_parse_audit = result['audit']
+        self.last_parse_truncated = result['truncated']
+        values = (result['objects'], result['status'], result['detail'])
+        return values + (result['truncated'],) if False else values
+
+    def parse_grounding_output(self, text, img_w, img_h, coordinate_protocol="yxyx_norm1000", legacy=False):
+        return self.parse_grounding_output_with_status(text, img_w, img_h, coordinate_protocol, legacy)[0]
 
     def predict_image(
         self,
@@ -187,10 +204,14 @@ class DeepSeekAdapter:
     ) -> Dict[str, Any]:
         self.load_model()
 
-        pil_img = Image.open(image_path).convert("RGB")
+        image_input = image_path
+        pil_img = image_input.convert("RGB") if isinstance(image_input, Image.Image) else Image.open(image_input).convert("RGB")
+        image_path = str(getattr(image_input, "filename", "in_memory_pil_image")) if isinstance(image_input, Image.Image) else str(image_input)
         w, h = pil_img.size
 
         if prompt is None:
+            if kwargs.get('coordinate_protocol', 'yxyx_norm1000') != 'yxyx_norm1000':
+                raise ValueError('A nondefault coordinate protocol requires an explicit matching prompt')
             prompt = self.build_prompt()
 
         if torch.cuda.is_available():
@@ -219,7 +240,7 @@ class DeepSeekAdapter:
             outputs = gen_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=prepare_inputs.attention_mask,
-                pad_token_id=self.processor.tokenizer.pad_token_id,
+                pad_token_id=self.processor.tokenizer.eos_token_id,
                 bos_token_id=self.processor.tokenizer.bos_token_id,
                 eos_token_id=self.processor.tokenizer.eos_token_id,
                 max_new_tokens=max_new_tokens,
@@ -236,15 +257,35 @@ class DeepSeekAdapter:
 
         latency_ms = (time.time() - t0) * 1000
         raw_output = self.processor.tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=False)
-        detected_objects, status, status_detail = self.parse_grounding_output_with_status(raw_output, w, h)
+        detected_objects, status, status_detail = self.parse_grounding_output_with_status(raw_output, w, h, kwargs.get("coordinate_protocol", "yxyx_norm1000"))
 
+        generated_ids = outputs[0].cpu().tolist()
+        has_eos = generation_finished(generated_ids, self.processor.tokenizer.eos_token_id)
+        is_syntax_truncated = getattr(self, 'last_parse_truncated', False)
+        is_truncated = (len(generated_ids) >= max_new_tokens and not has_eos) or is_syntax_truncated
+        if is_truncated and status == 'success': status = 'partial_success'
+        if is_truncated and status == 'no_objects_detected': status = 'parse_failed'
         return {
+            "has_normal_eos": has_eos,
+            "generated_tokens": len(generated_ids),
+            "is_truncated": is_truncated,
+            "is_syntax_truncated": is_syntax_truncated,
+            "finish_reason": "eos_token" if has_eos else ("length" if len(generated_ids) >= max_new_tokens else "unknown"),
+            "native_grounding_verified": False,
+            "max_pixels_applied": False,
+            "image_preprocessing_policy": "VL1 processor fixed resize/pad; max_pixels is not an effective parameter",
+            "processed_pixel_values_shape": list(prepare_inputs.pixel_values.shape),
+            "model_family": "DeepSeek-VL-v1",
             "image_path": image_path,
             "width": w,
             "height": h,
             "prompt": prompt,
             "raw_output": raw_output,
             "objects": detected_objects,
+            "parse_audit": self.last_parse_audit,
+            "coordinate_protocol": kwargs.get("coordinate_protocol", "yxyx_norm1000"),
+            "coordinate_reference": "input_image_or_tile",
+            "prompt_sha256": __import__("hashlib").sha256(prompt.encode()).hexdigest(),
             "num_detected": len(detected_objects),
             "status": status,
             "status_detail": status_detail,

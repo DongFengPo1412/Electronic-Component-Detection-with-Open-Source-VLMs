@@ -156,3 +156,13 @@ Electronic-Component-Detection-with-Open-Source-VLMs/
 正式推理参数从 configs/frozen_protocol.yaml 读取；变更参数须另存新协议并指定 --protocol。
 COCO AP 默认报告 maxDets=[1,10,100]；evaluation.yaml 的密集扩展设置独立列于 dense_extended。
 无置信度 VLM 使用等分数排序，其 AP 为补充指标，不是校准置信度。主要报告 IoU=0.50 的 P/R/F1、TP/FP/FN 与失败状态。
+
+
+### P1 坐标与模型适配边界（2026-11-04）
+正式 Qwen 解析使用 `xyxy_norm1000`，不再按数字大小猜测尺度，也不交换倒置坐标或裁剪非法坐标。
+DeepSeek-VL-1.3B-chat 使用项目明确要求的 `yxyx_norm1000` 数值回答协议；这不是已验证的原生 grounding 能力，正式入口拒绝 VL2 的 `<|ref|>/<|det|>` 标记。
+共享几何解析器还可显式指定 norm1 或 pixels，以供对应输入协议的诊断；这些机械转换测试不证明模型支持所有格式。
+历史启发式解析必须显式 `legacy=True`，审计状态标记为非正式兼容。`verify_coordinate_protocol.py` 是历史原文回放，不是新 GPU 推理。
+缺失/未知类别不会变成合法元器件，过小或细长但几何合法的框不再被固定阈值误删；重复框保留并计数，交由声明的 NMS/评估处理。
+每次预测保存原文、坐标协议、解析各阶段计数、token/EOS 与截断状态。DeepSeek v1 的图像处理按自身 processor 执行固定 resize/pad，`max_pixels` 不作为实际生效参数。
+官方依据：[Qwen2-VL 论文 2.2.1](https://arxiv.org/html/2409.12191v2#S2.SS2.SSS1)、[DeepSeek-VL v1](https://github.com/deepseek-ai/DeepSeek-VL)、[DeepSeek-VL2](https://github.com/deepseek-ai/DeepSeek-VL2)。

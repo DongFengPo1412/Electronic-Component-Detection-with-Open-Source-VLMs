@@ -37,7 +37,7 @@ def get_adapter_hash(adapter_dir: Optional[str]) -> str:
     return hasher.hexdigest()[:16]
 
 
-POSTPROCESS_VERSION = "2.2_canonical_xfirst"
+POSTPROCESS_VERSION = "3.0_explicit_protocol_strict"
 
 
 def compute_prediction_cache_key(
@@ -127,11 +127,12 @@ def run_batch_inference(
     base_identity = model_identity(model_id)
     if adapter_dir:
         verify_adapter(adapter_dir, splits_path, model_id)
+    coordinate_protocol = protocol.get('coordinate_protocols', {'qwen':'xyxy_norm1000','deepseek':'yxyx_norm1000'})[model_family]
     gen = protocol['generation']
     if max_pixels != gen['max_pixels']:
         raise ValueError('max_pixels differs from frozen protocol')
     max_pixels = gen['max_pixels']
-    generation_kwargs = dict(max_new_tokens=gen['max_new_tokens'], repetition_penalty=gen['repetition_penalty'])
+    generation_kwargs = dict(max_new_tokens=gen['max_new_tokens'], repetition_penalty=gen['repetition_penalty'], coordinate_protocol=coordinate_protocol)
     if gen['do_sample']:
         raise ValueError('Only frozen deterministic decoding is supported')
     if tile_size is not None:
@@ -241,7 +242,7 @@ def run_batch_inference(
         w = img_entry["width"]
         h = img_entry["height"]
 
-        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio, adapter_dir, max_pixels, gen["max_new_tokens"], gen["repetition_penalty"], base_identity, gen["do_sample"], protocol["tiling"]["nms_iou_threshold"])
+        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio, adapter_dir, max_pixels, gen["max_new_tokens"], gen["repetition_penalty"], base_identity + coordinate_protocol, gen["do_sample"], protocol["tiling"]["nms_iou_threshold"])
 
         if cache_key in cached_predictions:
             print(f"[{idx+1}/{len(target_images)}] Image {iid} ({img_entry['folder']}): CACHED")
@@ -290,6 +291,8 @@ def run_batch_inference(
                         "generated_tokens": tile_res.get("generated_tokens"),
                         "token_budget": tile_res.get("token_budget"),
                         "raw_output": tile_res.get("raw_output", ""),
+                        "parse_audit": tile_res.get("parse_audit", {}),
+                        "coordinate_protocol": coordinate_protocol,
                         "num_detected": len(tile_res.get("objects", []))
                     })
 
@@ -362,6 +365,8 @@ def run_batch_inference(
                     "status": pred_item_raw.get("status", "success" if pred_item_raw["num_detected"] > 0 else "no_objects_detected"),
                     "status_detail": pred_item_raw.get("status_detail", ""),
                     "raw_output": pred_item_raw.get("raw_output", ""),
+                    "parse_audit": pred_item_raw.get("parse_audit", {}),
+                    "coordinate_protocol": coordinate_protocol,
                     "is_truncated": pred_item_raw.get("is_truncated", False),
                     "is_syntax_truncated": pred_item_raw.get("is_syntax_truncated", False),
                     "generated_tokens": pred_item_raw.get("generated_tokens"),
