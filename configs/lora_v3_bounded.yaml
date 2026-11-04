@@ -1,0 +1,37 @@
+run_id: v3-qlora-r6-bounded160-20261104
+purpose: bounded_detection_comparison_not_converged
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  bias: none
+  task_type: CAUSAL_LM
+training:
+  seed: 42
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 0.0001
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  save_steps: 40
+  max_val_batches: null
+data:
+  max_length: 1536
+  image_max_pixels: 200704
+  max_objects: null
+  max_response_len: null
+bounds:
+  total_optimizer_updates: 160
+  training_wall_seconds: 2400
+  evaluation_wall_seconds_per_process: 3600
+  max_training_attempts: 1

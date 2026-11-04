@@ -245,6 +245,14 @@ def main():
     cfg["provenance"] = {"train_sft_path": os.path.abspath(args.data_file),
         "base_model_sha256": model_identity(args.model_path),
         "git_commit": code_identity(), "source_tree_sha256": source_identity(), "dependencies": dependencies()}
+    from pathlib import Path
+    annotation_file = Path(splits_file).with_name('coco_annotations.json')
+    cfg['provenance'].update({
+        'annotations_sha256': hashlib.sha256(annotation_file.read_bytes()).hexdigest() if annotation_file.is_file() else None,
+        'splits_path': os.path.abspath(splits_file),
+        'val_sft_path': os.path.abspath(args.val_data_file) if args.val_data_file else None,
+        'val_sft_sha256': hashlib.sha256(Path(args.val_data_file).read_bytes()).hexdigest() if args.val_data_file else None,
+    })
     if args.resume_from_checkpoint:
         previous = verify_adapter(args.resume_from_checkpoint, splits_file, args.model_path)
         if previous['train_sft_sha256'] != train_sft_sha256:
@@ -478,6 +486,8 @@ def main():
     global_batch_counter = total_batches_processed
     accum_counter = 0
     update_started = time.time()
+    window_indices = []
+    window_lengths = []
 
     for epoch in range(start_epoch, 100):
         if epoch == start_epoch and start_batch_in_epoch > 0:
@@ -491,6 +501,8 @@ def main():
             global_batch_counter += 1
             accum_counter += 1
             current_batch_in_epoch += 1
+            window_indices.extend(batch_sampler.get_all_batches()[current_batch_in_epoch - 1])
+            window_lengths.append(int(batch["input_ids"].shape[1]))
             batch = {k: v.to(args.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
             outputs = model(**batch)
@@ -554,6 +566,11 @@ def main():
                 record = {
                     "optimizer_steps_this_process": step - (start_step if "start_step" in locals() else 0),
                     "step": step,
+                    "sample_ids": [dataset.data[i]["id"] for i in window_indices],
+                    "physical_board_ids": [dataset.data[i].get("physical_board_id", "unknown") for i in window_indices],
+                    "sequence_token_lengths": list(window_lengths),
+                    "microbatches_this_update": len(window_lengths),
+                    "peak_reserved_vram_mb": round(torch.cuda.max_memory_reserved() / (1024 * 1024), 2) if torch.cuda.is_available() else 0.0,
                     "gradient_norm": float(grad_norm),
                     "step_wall_s": round(time.time() - update_started, 3),
                     "sequence_tokens": int(batch["input_ids"].shape[1]),
@@ -628,6 +645,10 @@ def main():
                     print(f"Step [{step:03d}/{args.max_steps}] Loss: {step_loss:.4f} | Peak VRAM: {peak_vram:.2f} MB | Elapsed: {record['time_elapsed_s']}s", flush=True)
 
                 history.append(record)
+                with open(os.path.join(args.output_dir, "training_history.jsonl"), "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record) + "\n")
+                window_indices = []
+                window_lengths = []
                 update_started = time.time()
 
                 if step % cfg["training"].get("save_steps", 10) == 0 or step >= effective_stop:
@@ -678,6 +699,7 @@ def main():
             "total_steps": step,
             "epochs": round(global_batch_counter / len(dataset), 2),
             "actual_sample_ids": [r["id"] for r in dataset.data],
+            "processed_sample_ids": [sid for row in history for sid in row.get("sample_ids", [])],
             "validation_sample_ids": [r["id"] for r in val_dataset.data] if val_loader else [],
             "use_qlora": args.use_qlora,
             "scheduler_horizon": args.max_steps,
