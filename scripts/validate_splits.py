@@ -12,6 +12,9 @@ def validate_splits(splits_path: str) -> Dict[str, Any]:
     with open(splits_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+    from pcb_vlm.provenance import validate_partition, read_json
+    validate_partition(data, read_json(os.path.join(os.path.dirname(splits_path), 'images_manifest.json')))
     meta = data["metadata"]
     splits = data["splits"]
 

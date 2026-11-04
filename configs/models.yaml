@@ -22,10 +22,10 @@ models:
     license: "DeepSeek License"
     params_total: "1.3B"
     architecture: "SigLIP Vision Encoder + DeepSeek-LLM-1.3B"
-    native_grounding_format: "<|ref|>{label}<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>"
+    native_grounding_format: null # No verified native VL2 grounding protocol for VL1.3B
     coordinate_range: "[0, 1000]"
     supported_roles: ["inference", "comparative_baseline"]
     vram_bfloat16_weights_mb: 2800
     expected_peak_vram_inference_mb: 5500
     local_snapshot_dir: "models/models/deepseek-ai--deepseek-vl-1.3b-chat/snapshots/master"
-    notes: "横向对比模型，使用原生 Grounding 标记，输出坐标统一转换至原图像素 xyxy 格式评估"
+    notes: "实际为 DeepSeek-VL-1.3B-chat；现存数值定位解析属于探索协议，原生定位能力未验证；适配器修复留待 P1"

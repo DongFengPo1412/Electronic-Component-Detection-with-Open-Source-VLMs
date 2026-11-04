@@ -18,6 +18,7 @@ import yaml
 import time
 import argparse
 import hashlib
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 from typing import List, Dict, Any, Optional
 
 try:
@@ -96,8 +97,10 @@ def evaluate_run_at_thresholds(predictions_file, coco_file, test_image_ids, thre
 
 def verify_lora_adapter_provenance(lora_adapter_dir: str, splits_sha256: str, test_boards: List[str]):
     """Strictly verify LoRA adapter provenance against canonical split hash and boards."""
-    if not lora_adapter_dir or not os.path.exists(lora_adapter_dir):
+    if not lora_adapter_dir:
         return
+    if not os.path.isdir(lora_adapter_dir):
+        raise FileNotFoundError(lora_adapter_dir)
 
     # Check for metadata/manifest in adapter_dir or its parent directory
     candidates = [
@@ -155,6 +158,13 @@ def verify_lora_adapter_provenance(lora_adapter_dir: str, splits_sha256: str, te
             f"[Contamination Error] LoRA adapter was trained on boards that overlap with canonical test boards: {leakage}"
         )
 
+    from pcb_vlm.provenance import load_protocol, verify_adapter, sha256
+    protocol = load_protocol()
+    split_path = os.path.join(protocol['dataset_canonical_dir'], 'splits.json')
+    if sha256(split_path) != splits_sha256 or set(test_boards) != set(protocol['test_split']['boards']):
+        raise ValueError('Provenance check does not use the frozen split')
+    verify_adapter(lora_adapter_dir, split_path, protocol['models']['qwen_base'])
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run test matrix evaluation.")
@@ -171,6 +181,12 @@ def main():
     out_base_dir = args.output_dir
     base_model = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master"
     lora_adapter = args.lora_adapter
+    from pcb_vlm.provenance import load_protocol, verify_adapter
+    protocol = load_protocol()
+    if hashlib.sha256(open(splits_file, "rb").read()).hexdigest() != protocol["split_sha256"]:
+        raise ValueError("Matrix split differs from frozen protocol")
+    if lora_adapter:
+        verify_adapter(lora_adapter, splits_file, base_model)
     os.makedirs(out_base_dir, exist_ok=True)
 
     with open(splits_file, "rb") as f:
@@ -270,6 +286,8 @@ def main():
         "experiments": {}
     }
 
+    for experiment in experiments:
+        experiment["args"].extend(["--protocol", os.path.join(os.path.dirname(__file__), "..", "configs", "frozen_protocol.yaml")])
     all_experiments_successful = True
     for exp in experiments:
         success, dur = run_test_experiment(f"{exp['id']} ({exp['name']})", exp["args"])
@@ -296,10 +314,12 @@ def main():
                 avg_latency_ms = mf.get("avg_latency_ms", 0.0)
 
         eval_res = evaluate_run_at_thresholds(preds_path, coco_file, test_image_ids)
+        if eval_res['official_coco_metrics'].get('error'):
+            all_experiments_successful = False
 
         summary["experiments"][exp["id"]] = {
             "name": exp["name"],
-            "status": "success",
+            "status": "evaluation_failed" if eval_res["official_coco_metrics"].get("error") else "success",
             "wall_time_s": round(dur, 2),
             "avg_latency_ms": avg_latency_ms,
             "peak_vram_mb": vram_mb,
@@ -317,7 +337,12 @@ def main():
         print(f"All Stage 16 Test Experiments Finished Successfully!")
     else:
         print(f"Test Matrix Completed with Errors. Some experiments failed.")
+    summary["execution_status"] = "completed" if all_experiments_successful else "partial_failed"
+    with open(summary_file, "w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2)
     print(f"Summary written to: {summary_file}")
+    if not all_experiments_successful:
+        sys.exit(2)
     print(f"=======================================================")
 
 

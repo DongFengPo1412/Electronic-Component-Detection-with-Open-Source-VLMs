@@ -27,7 +27,7 @@ CANONICAL_CATEGORY_COCO_LIST = [
 def get_canonical_categories(classes_yaml_path: Optional[str] = None) -> List[str]:
     """Retrieve the sorted canonical category list from classes.yaml or fallback."""
     if classes_yaml_path is None:
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         candidate = os.path.join(base_dir, "configs", "classes.yaml")
         if os.path.exists(candidate):
             classes_yaml_path = candidate
@@ -53,8 +53,19 @@ def validate_category_consistency(categories: List[str], expected: Optional[List
     expected_set = set(expected)
 
     missing = expected_set - cat_set
-    if missing:
+    if missing or cat_set != expected_set or len(categories) != len(cat_set):
         raise ValueError(
             f"Category inconsistency detected! Missing required canonical categories: {sorted(missing)}. "
             f"Provided: {sorted(categories)}, Expected: {sorted(expected)}"
         )
+
+
+def get_category_definitions():
+    from pathlib import Path
+    data = yaml.safe_load((Path(__file__).resolve().parents[2] / 'configs/classes.yaml').read_text(encoding='utf-8'))['categories']
+    validate_category_consistency([c['name'] for c in data])
+    if len({c['id'] for c in data}) != len(data):
+        raise ValueError('Duplicate category IDs')
+    return data
+
+CANONICAL_CATEGORY_COCO_LIST = [{"id": c["id"], "name": c["name"]} for c in get_category_definitions()]

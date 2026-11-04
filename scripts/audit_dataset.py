@@ -104,6 +104,20 @@ def audit_coco_dataset(coco_path: str, manifest_path: str, output_report: str = 
         "physical_board_statistics": board_stats
     }
 
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+    from pcb_vlm.provenance import physical_id, sha256
+    by_id = {e['image_id']: e for e in manifest}
+    source_errors = [e['image_id'] for e in manifest if not os.path.isfile(e['image_path']) or sha256(e['image_path']) != e['sha256']]
+    hashes = Counter(e['sha256'] for e in manifest)
+    coverage = {}
+    for cid, category in categories.items():
+        image_ids = {a['image_id'] for a in annotations if a['category_id'] == cid}
+        coverage[category['name']] = {'images': len(image_ids), 'physical_boards': len({physical_id(by_id[i]['folder']) for i in image_ids})}
+    audit_summary['source_errors'] = source_errors
+    audit_summary['duplicate_image_hashes'] = [h for h,n in hashes.items() if n > 1]
+    audit_summary['category_coverage'] = coverage
+    audit_summary['quality_audit']['passed_sanity_check'] &= not source_errors and not audit_summary['duplicate_image_hashes']
     if output_report:
         os.makedirs(os.path.dirname(output_report), exist_ok=True)
         with open(output_report, "w", encoding="utf-8") as f:
@@ -135,6 +149,8 @@ def main():
 
     print(f"\nTotal Physical Boards: {summary['total_physical_boards']}")
     print("Dataset audit complete.")
+    if not qa["passed_sanity_check"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

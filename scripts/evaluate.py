@@ -65,27 +65,19 @@ def is_valid_box(box: Any, img_w: Optional[float] = None, img_h: Optional[float]
     if x1 < 0.0 or y1 < 0.0:
         return False
     if img_w is not None:
-        if x1 >= img_w or x2 > img_w * 1.01:
+        if x1 >= img_w or x2 > img_w:
             return False
     if img_h is not None:
-        if y1 >= img_h or y2 > img_h * 1.01:
+        if y1 >= img_h or y2 > img_h:
             return False
     return True
 
 
-DEFAULT_PCB_CATEGORIES = [
-    {"id": 1, "name": "capacitor"},
-    {"id": 2, "name": "resistor"},
-    {"id": 3, "name": "ic"},
-    {"id": 4, "name": "connector"},
-    {"id": 5, "name": "led"},
-    {"id": 6, "name": "transistor"},
-    {"id": 7, "name": "diode"},
-    {"id": 8, "name": "inductor"},
-    {"id": 9, "name": "button"},
-    {"id": 10, "name": "switch"},
-    {"id": 11, "name": "clock"}
-]
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from pcb_vlm.config import CANONICAL_CATEGORY_COCO_LIST
+DEFAULT_PCB_CATEGORIES = CANONICAL_CATEGORY_COCO_LIST
+
 
 
 def extract_clean_predictions(
@@ -240,7 +232,13 @@ def extract_clean_predictions(
             x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
             raw_cat = obj.get("category_id", obj.get("label", obj.get("category")))
             raw_cat_str = str(raw_cat).strip().lower() if raw_cat is not None else ""
-            score = float(obj.get("score", 1.0)) if obj.get("score") is not None else 1.0
+            try:
+                score = float(obj.get("score", 1.0)) if obj.get("score") is not None else 1.0
+                if not math.isfinite(score):
+                    raise ValueError('Nonfinite score')
+            except (TypeError, ValueError):
+                stats['invalid_box_count'] += 1
+                continue
 
             if raw_cat_str in cat_name_to_id:
                 canonical_cat = cat_id_to_name.get(cat_name_to_id[raw_cat_str], raw_cat_str)
@@ -288,6 +286,17 @@ def extract_clean_predictions(
     return pred_by_img, coco_detections, stats
 
 
+def scope_ground_truth(gt, expected):
+    if expected is None:
+        return gt
+    ids = {str(i) for i in expected}
+    available = {str(i.get('id', i.get('image_id'))) for i in gt.get('images', [])}
+    if not ids.issubset(available):
+        raise ValueError('Expected evaluation images absent from GT')
+    return {**gt, 'images':[i for i in gt['images'] if str(i.get('id', i.get('image_id'))) in ids],
+            'annotations':[a for a in gt.get('annotations', []) if str(a['image_id']) in ids]}
+
+
 def evaluate_detections(
     gt_data: Dict[str, Any],
     pred_data: Dict[str, Any],
@@ -297,6 +306,7 @@ def evaluate_detections(
     """
     Evaluates predictions against ground truth using strict one-to-one greedy matching.
     """
+    gt_data = scope_ground_truth(gt_data, expected_image_ids)
     # Map GT objects by image_id
     gt_by_img = {}
     for item in gt_data.get("images", []):
@@ -472,9 +482,11 @@ def compute_official_coco_eval(
     gt_coco_dict: Dict[str, Any],
     pred_data: Dict[str, Any],
     pre_extracted_coco_detections: Optional[List[Dict[str, Any]]] = None,
-    expected_image_ids: Optional[List[Any]] = None
+    expected_image_ids: Optional[List[Any]] = None,
+    evaluation_config: Optional[str] = None
 ) -> Dict[str, Any]:
     """Computes official COCO AP@[.50:.95], AP50, AP75 via pycocotools."""
+    gt_coco_dict = scope_ground_truth(gt_coco_dict, expected_image_ids)
     try:
         from pycocotools.coco import COCO
         from pycocotools.cocoeval import COCOeval
@@ -491,59 +503,48 @@ def compute_official_coco_eval(
     if "categories" not in gt_dict_copy or not gt_dict_copy["categories"]:
         gt_dict_copy["categories"] = DEFAULT_PCB_CATEGORIES
 
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f_gt:
-        json.dump(gt_dict_copy, f_gt)
-        f_gt_path = f_gt.name
-
-    try:
-        import io
-        import contextlib
+    import copy
+    import io
+    import contextlib
+    import yaml
+    config_path = evaluation_config or os.path.join(os.path.dirname(__file__), "..", "configs", "evaluation.yaml")
+    with open(config_path, encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    limits = config["metrics"]["coco_max_dets"]
+    if limits[:3] != [1, 10, 100] or any(not isinstance(n, int) or n <= 0 for n in limits):
+        raise ValueError("COCO maxDets must start with [1,10,100]")
+    def calculate(limit):
         with contextlib.redirect_stdout(io.StringIO()):
-            coco_gt = COCO(f_gt_path)
+            coco_gt = COCO()
+            coco_gt.dataset = copy.deepcopy(gt_dict_copy)
+            coco_gt.dataset.setdefault("info", {})
+            coco_gt.createIndex()
+            for ann in coco_gt.dataset.get("annotations", []):
+                ann.setdefault("iscrowd", 0)
+                ann.setdefault("area", ann["bbox"][2] * ann["bbox"][3])
             if not coco_detections:
-                return {
-                    "mAP_50_95": 0.0,
-                    "AP_50": 0.0,
-                    "AP_75": 0.0,
-                    "AR_50_95": 0.0,
-                    "total_detections": 0,
-                    "note": "Zero valid detections to evaluate"
-                }
-            try:
-                coco_dt = coco_gt.loadRes(coco_detections)
-                coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
-                coco_eval.evaluate()
-                coco_eval.accumulate()
-                coco_eval.summarize()
-            except Exception as e:
-                return {
-                    "error": f"COCO evaluation execution failed: {str(e)}",
-                    "AP_50": None,
-                    "mAP_50_95": None,
-                    "total_detections": len(coco_detections)
-                }
-
-        stats = coco_eval.stats
-        return {
-            "mAP_50_95": round(float(stats[0]), 4),
-            "AP_50": round(float(stats[1]), 4),
-            "AP_75": round(float(stats[2]), 4),
-            "AP_small": round(float(stats[3]), 4),
-            "AP_medium": round(float(stats[4]), 4),
-            "AP_large": round(float(stats[5]), 4),
-            "AR_50_95": round(float(stats[8]), 4),
-            "total_detections": len(coco_detections)
-        }
-    except Exception as outer_e:
-        return {
-            "error": f"COCO initialization error: {str(outer_e)}",
-            "AP_50": None,
-            "mAP_50_95": None,
-            "total_detections": len(coco_detections)
-        }
-    finally:
-        if os.path.exists(f_gt_path):
-            os.remove(f_gt_path)
+                return {"mAP_50_95": 0.0, "AP_50": 0.0, "AP_75": 0.0, "maxDets": [1, 10, limit]}
+            coco_dt = coco_gt.loadRes(coco_detections)
+            evaluator = COCOeval(coco_gt, coco_dt, "bbox")
+            evaluator.params.maxDets = [1, 10, limit]
+            evaluator.evaluate(); evaluator.accumulate()
+            # Read the actual precision tensor: summarize() assumes maxDets=100.
+            precision = evaluator.eval["precision"][:, :, :, 0, 2]
+            def mean(values):
+                valid = values[values > -1]
+                return round(float(valid.mean()), 4) if valid.size else -1.0
+            result = {"mAP_50_95": mean(precision), "AP_50": mean(precision[0]),
+                      "AP_75": mean(precision[5]), "maxDets": [1, 10, limit]}
+            for i, label in enumerate(("small", "medium", "large"), 1):
+                result["AP_" + label] = mean(evaluator.eval["precision"][:, :, :, i, 2])
+            result["AR_50_95"] = mean(evaluator.eval["recall"][:, :, 0, 2])
+            return result
+    result = calculate(100)
+    result["total_detections"] = len(coco_detections)
+    result["score_policy"] = "Provided scores retained; missing scores tied at 1.0, uncalibrated VLM AP is supplementary"
+    if max(limits) > 100:
+        result["dense_extended"] = calculate(max(limits))
+    return result
 
 
 def filter_gt_and_preds_by_split(

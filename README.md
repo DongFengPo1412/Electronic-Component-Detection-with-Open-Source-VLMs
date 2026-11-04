@@ -20,7 +20,7 @@
    - 但在标准检测指标（IoU≥0.50）下，LoRA 微调（Q3）仅取得 1 个真正例（TP），低于基础模型分块（Q1）的 2 个 TP，微调尚未形成稳定正收益；
    - 早期实验所观察到的“低门槛（IoU≥0.10）TP 增长”（从 1 个增至 37 个），伴随产生超过 1,600 个沿 PCB 铜线走线分布的阶梯状虚警框（Ladder Hallucination），本质属于语言模型自回归重复生成的结构性失效，不代表工业高精度定位能力。
 3. **数据集与板级隔离规范**：
-   - 实验采用 **Georgia Tech RIPL WACV 2019 PCB 数据集**（共 47 张高分辨率图像，对应 29 块独立物理板），选取 9 类主要元器件；该数据集需与 FICS-PCB / FPIC（显微镜/DSLR 子集）严格区分；
+   - 实验采用 **Georgia Tech RIPL WACV 2019 PCB 数据集**（共 47 张高分辨率图像，对应 29 块独立物理板），选取 11 类元器件；该数据集需与 FICS-PCB / FPIC（显微镜/DSLR 子集）严格区分；
    - 建立了经人工复核的物理板映射规范（`configs/board_canonical_map.json`），将多视图（如 `ML450_Top1/Top2/Bottom1/Bottom2`、`XLVDSproSupply`）统一归入单一物理板，彻底杜绝板级跨集合泄漏。
 
 ---
@@ -92,7 +92,7 @@ python scripts/demo_app.py
 
 ---
 
-## 📊 实验实测结果对比（测试集 8 张图像，860 个 Ground Truth 元器件）
+## 📊 历史探索结果（旧划分：8 张图像、860 个 GT；非当前正式测试）
 
 | 方案代号 | 模型架构与配置 | 输入形式 | 预测框总数 | 标准 TP (IoU≥0.50) | 标准 Precision (0.50) | 标准 Recall (0.50) | 诊断 TP (IoU≥0.10) | 诊断 Precision (0.10) | 单图耗时 |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -147,3 +147,12 @@ Electronic-Component-Detection-with-Open-Source-VLMs/
 - **特别声明**：
   - 本项目当前实验所用数据为上述 WACV 2019 数据集，非 FICS-PCB / FPIC 数据集；两者拍摄设备与标注规范不同，在毕业论文中须明确区分并向导师报备确认。
 
+
+
+### P0 实验边界（2026-11-04）
+历史 8 图 / 860 GT、旧划分 LoRA、外部探索实验均不等于当前冻结协议的正式测试结果。
+正式测试以 canonical splits.json 的 MicroZed、Spartan3、ThingMagicM6e、Virtex6（5 图）为准；不得为复用旧成绩更改测试集。
+旧 SFT 缺少逐条来源字段、旧 LoRA 缺少完整元数据时保留原文件，仅供历史诊断；新的正式入口会拒绝这些输入。
+正式推理参数从 configs/frozen_protocol.yaml 读取；变更参数须另存新协议并指定 --protocol。
+COCO AP 默认报告 maxDets=[1,10,100]；evaluation.yaml 的密集扩展设置独立列于 dense_extended。
+无置信度 VLM 使用等分数排序，其 AP 为补充指标，不是校准置信度。主要报告 IoU=0.50 的 P/R/F1、TP/FP/FN 与失败状态。

@@ -9,12 +9,17 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Tuple
 import yaml
 import cv2
+import re
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 
 def load_classes_config(config_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[str]]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     categories = cfg["categories"]
+    from pcb_vlm.config import get_category_definitions
+    if [(c["id"], c["name"]) for c in categories] != [(c["id"], c["name"]) for c in get_category_definitions()]:
+        raise ValueError("Category ID/name mapping differs from classes.yaml")
     pattern_to_id = {}
     for cat in categories:
         cid = cat["id"]
@@ -43,13 +48,7 @@ def extract_board_group_id(folder_name: str) -> str:
     if folder_name in cmap:
         return cmap[folder_name]
 
-    # Fallback for unforeseen names
-    name = folder_name
-    for suffix in ["_Top1", "_Top2", "_Top", "_Bottom1", "_Bottom2", "_Bottom", "_top", "_bottom"]:
-        if name.endswith(suffix):
-            name = name[:-len(suffix)]
-            break
-    return name
+    raise ValueError(f"Unmapped physical board folder: {folder_name}")
 
 
 def compute_sha256(filepath: str) -> str:
@@ -69,7 +68,7 @@ def match_category(raw_name: str, pattern_to_id: Dict[str, int], ignore_patterns
 
     # Check categories
     for pat, cid in pattern_to_id.items():
-        if pat in clean_name:
+        if re.search(r"(?<![a-z0-9])" + re.escape(pat) + r"(?![a-z0-9])", clean_name):
             return cid, pat
 
     return 0, "unmatched"

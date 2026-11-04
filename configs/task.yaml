@@ -4,7 +4,7 @@ task_name: "Electronic-Component-Detection-with-Open-Source-VLMs"
 thesis_title_zh: "基于开源视觉语言大模型的电子元器件检测"
 
 task_definition:
-  dataset_name: "Georgia Tech PCB WACV 2019 (FPIC)"
+  dataset_name: "Georgia Tech RIPL PCB WACV 2019"
   input_type: "已装配印刷电路板（PCB）高分辨率可见光图像"
   output_type: "电子元器件类别标签及水平矩形边界框像素坐标 [x1, y1, x2, y2]"
   splits_source: "annotations_v2_canonical/splits.json"

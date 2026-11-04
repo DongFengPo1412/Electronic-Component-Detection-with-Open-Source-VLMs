@@ -16,10 +16,8 @@ from typing import Dict, List, Any, Optional, Tuple
 from PIL import Image
 import torch
 
-DEFAULT_PCB_CLASSES = [
-    "button", "capacitor", "clock", "connector", "diode",
-    "ic", "inductor", "led", "resistor", "switch", "transistor"
-]
+from pcb_vlm.config import get_canonical_categories
+DEFAULT_PCB_CLASSES = get_canonical_categories()
 
 
 class DeepSeekAdapter:
@@ -226,7 +224,7 @@ class DeepSeekAdapter:
                 eos_token_id=self.processor.tokenizer.eos_token_id,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                repetition_penalty=1.25,
+                repetition_penalty=kwargs.get("repetition_penalty", 1.25),
                 use_cache=True
             )
 

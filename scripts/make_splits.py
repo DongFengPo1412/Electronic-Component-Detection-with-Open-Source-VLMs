@@ -18,6 +18,11 @@ def make_splits(
     val_ratio: float = 0.15,
     test_ratio: float = 0.15
 ) -> Dict[str, Any]:
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+    from pcb_vlm.provenance import physical_id
+    if os.path.exists(output_path):
+        raise FileExistsError("Protect existing split; choose a new output path")
     with open(coco_path, "r", encoding="utf-8") as f:
         coco = json.load(f)
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -26,11 +31,17 @@ def make_splits(
     # Group images and annotations by board_group_id
     board_to_images = defaultdict(list)
     for img in manifest:
-        board_to_images[img["board_group_id"]].append(img)
+        board = physical_id(img["folder"])
+        if img["board_group_id"] != board:
+            raise ValueError("Manifest board identity mismatch")
+        board_to_images[board].append(img)
 
     board_to_cat_counts = defaultdict(Counter)
     for ann in coco["annotations"]:
-        bg = ann["board_group_id"]
+        source = next(i for i in manifest if i["image_id"] == ann["image_id"])
+        bg = physical_id(source["folder"])
+        if ann["board_group_id"] != bg:
+            raise ValueError("Annotation board identity mismatch")
         cid = ann["category_id"]
         board_to_cat_counts[bg][cid] += 1
 

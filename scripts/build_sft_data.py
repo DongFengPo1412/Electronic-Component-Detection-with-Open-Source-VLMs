@@ -75,7 +75,7 @@ def process_split_sft(
 
     for iid in target_image_ids:
         if iid not in manifest_by_id:
-            continue
+            raise ValueError(f"Missing image ID: {iid}")
         entry = manifest_by_id[iid]
         ipath = entry["image_path"]
         w = entry["width"]
@@ -83,7 +83,7 @@ def process_split_sft(
         folder = entry["folder"]
 
         if not os.path.exists(ipath):
-            continue
+            raise FileNotFoundError(ipath)
 
         pil_img = Image.open(ipath).convert("RGB")
         raw_anns = coco_anns_by_img.get(iid, [])
@@ -242,6 +242,8 @@ def main():
     parser.add_argument("--min-visibility", type=float, default=0.50, help="Min component visible area ratio.")
     args = parser.parse_args()
 
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+        raise FileExistsError("SFT rebuild requires a new empty output directory")
     os.makedirs(args.output_dir, exist_ok=True)
     crops_dir = os.path.join(args.output_dir, "crops")
 
@@ -252,6 +254,10 @@ def main():
     with open(args.manifest, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
+    from pcb_vlm.provenance import validate_partition
+    from pcb_vlm.config import validate_category_consistency
+    validate_partition(splits, manifest)
+    validate_category_consistency([c["name"] for c in coco["categories"]])
     # Categories
     cat_id_to_name = {c["id"]: c["name"].lower() for c in coco.get("categories", [])}
     target_classes = sorted(list(set(cat_id_to_name.values())))
@@ -297,6 +303,10 @@ def main():
         overlap_ratio=args.overlap_ratio,
         min_visibility=args.min_visibility
     )
+
+    from pcb_vlm.provenance import stamp_samples
+    stamp_samples(train_records, "train", args.splits, manifest)
+    stamp_samples(val_records, "val", args.splits, manifest)
 
     train_out = os.path.join(args.output_dir, "train_sft.json")
     val_out = os.path.join(args.output_dir, "val_sft.json")

@@ -6,11 +6,13 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
+from pcb_vlm.provenance import load_protocol, sha256, model_identity, verify_adapter
 from pcb_vlm.models.qwen_adapter import QwenAdapter
 from pcb_vlm.models.deepseek_adapter import DeepSeekAdapter
 from pcb_vlm.geometry.tiling import generate_tiles, map_tile_box_to_global, nms_merge_predictions
@@ -19,8 +21,10 @@ from evaluate import evaluate_detections, compute_official_coco_eval
 
 def get_adapter_hash(adapter_dir: Optional[str]) -> str:
     """Computes a true SHA-256 hash of the actual file contents of adapter weights and configs."""
-    if not adapter_dir or not os.path.exists(adapter_dir):
+    if not adapter_dir:
         return "no_adapter"
+    if not os.path.isdir(adapter_dir):
+        raise FileNotFoundError(adapter_dir)
     hasher = hashlib.sha256()
     for root, _, files in os.walk(adapter_dir):
         for fname in sorted(files):
@@ -45,13 +49,16 @@ def compute_prediction_cache_key(
     adapter_dir: Optional[str] = None,
     max_pixels: int = 768 * 28 * 28,
     max_new_tokens: int = 1024,
-    repetition_penalty: float = 1.25
+    repetition_penalty: float = 1.25,
+    model_sha256: str = "",
+    do_sample: bool = False,
+    nms_iou: float = 0.5
 ) -> str:
     hasher = hashlib.sha256()
     adapter_hash = get_adapter_hash(adapter_dir)
     content = (
         f"{image_sha256}_{model_id}_{prompt}_{tile_size}_{overlap}_"
-        f"{adapter_hash}_{max_pixels}_{max_new_tokens}_{repetition_penalty}_{POSTPROCESS_VERSION}"
+        f"{adapter_hash}_{max_pixels}_{max_new_tokens}_{repetition_penalty}_{model_sha256}_{do_sample}_{nms_iou}_{POSTPROCESS_VERSION}"
     )
     hasher.update(content.encode("utf-8"))
     return hasher.hexdigest()
@@ -109,8 +116,33 @@ def run_batch_inference(
     limit: Optional[int] = None,
     no_cache: bool = False,
     prompt_text: Optional[str] = None,
-    prompt_type: str = "original"
+    prompt_type: str = "original",
+    protocol_path: Optional[str] = None
 ) -> Dict[str, Any]:
+    protocol = load_protocol(protocol_path)
+    if sha256(splits_path) != protocol['split_sha256']:
+        raise ValueError('Run split differs from frozen protocol')
+    if model_family == 'qwen' and Path(model_id).resolve() != Path(protocol['models']['qwen_base']).resolve():
+        raise ValueError('Requested model differs from frozen Qwen model')
+    base_identity = model_identity(model_id)
+    if adapter_dir:
+        verify_adapter(adapter_dir, splits_path, model_id)
+    gen = protocol['generation']
+    if max_pixels != gen['max_pixels']:
+        raise ValueError('max_pixels differs from frozen protocol')
+    max_pixels = gen['max_pixels']
+    generation_kwargs = dict(max_new_tokens=gen['max_new_tokens'], repetition_penalty=gen['repetition_penalty'])
+    if gen['do_sample']:
+        raise ValueError('Only frozen deterministic decoding is supported')
+    if tile_size is not None:
+        if tile_size != protocol['tiling']['tile_size'] or overlap_ratio != protocol['tiling']['overlap_ratio']:
+            raise ValueError('Tiling arguments differ from frozen protocol')
+    if prompt_text and prompt_text != protocol['prompt']:
+        raise ValueError('Custom prompt requires a new frozen protocol file')
+    if prompt_type != 'original':
+        raise ValueError('Prompt preset requires a new frozen protocol file')
+    if model_family == 'qwen':
+        prompt_text = protocol['prompt']
     os.makedirs(output_dir, exist_ok=True)
     predictions_file = os.path.join(output_dir, "predictions.jsonl")
 
@@ -129,6 +161,10 @@ def run_batch_inference(
         target_image_ids = set(selected_ids)
 
     target_images = [img for img in manifest if img["image_id"] in target_image_ids]
+    if not target_images or {i['image_id'] for i in target_images} != target_image_ids:
+        raise ValueError('Missing/empty inference images in manifest')
+    if image_ids and not set(image_ids).issubset(set(splits['splits'][split_name]['image_ids'])):
+        raise ValueError('Requested images outside split')
 
     print(f"Loaded split '{split_name}': {len(target_images)} target images (selected IDs: {selected_ids}).")
 
@@ -143,7 +179,7 @@ def run_batch_inference(
         print(f"Loaded {len(cached_predictions)} cached predictions from {predictions_file}.")
     elif no_cache and os.path.exists(predictions_file):
         # Truncate existing file if force fresh
-        open(predictions_file, "w", encoding="utf-8").close()
+        raise FileExistsError("Fresh runs require a new output directory; historical predictions are protected")
         print("Force fresh execution: cleared previous predictions file.")
 
     # Load model adapter
@@ -199,11 +235,13 @@ def run_batch_inference(
     for idx, img_entry in enumerate(target_images):
         iid = img_entry["image_id"]
         ipath = img_entry["image_path"]
-        isha = img_entry["sha256"]
+        isha = sha256(ipath)
+        if isha != img_entry["sha256"]:
+            raise ValueError(f"Source image hash mismatch: {ipath}")
         w = img_entry["width"]
         h = img_entry["height"]
 
-        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio, adapter_dir, max_pixels)
+        cache_key = compute_prediction_cache_key(isha, model_id, prompt, tile_size, overlap_ratio, adapter_dir, max_pixels, gen["max_new_tokens"], gen["repetition_penalty"], base_identity, gen["do_sample"], protocol["tiling"]["nms_iou_threshold"])
 
         if cache_key in cached_predictions:
             print(f"[{idx+1}/{len(target_images)}] Image {iid} ({img_entry['folder']}): CACHED")
@@ -234,7 +272,7 @@ def run_batch_inference(
                     crop_tile = pil_img.crop((bx1, by1, bx2, by2))
 
                     # Direct in-memory PIL Image inference (eliminates JPEG compression artifacts)
-                    tile_res = adapter.predict_image(crop_tile, prompt=prompt, max_pixels=max_pixels)
+                    tile_res = adapter.predict_image(crop_tile, prompt=prompt, max_pixels=max_pixels, **generation_kwargs)
 
                     t_status = tile_res.get("status", "unknown")
                     t_detail = tile_res.get("status_detail", "")
@@ -263,7 +301,7 @@ def run_batch_inference(
                             "score": obj.get("score")
                         })
 
-                merged_objects = nms_merge_predictions(patch_predictions, iou_threshold=0.50)
+                merged_objects = nms_merge_predictions(patch_predictions, iou_threshold=protocol["tiling"]["nms_iou_threshold"])
                 latency_ms = (time.time() - t0) * 1000
                 peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
 
@@ -311,7 +349,7 @@ def run_batch_inference(
                 }
             else:
                 # Whole image inference
-                pred_item_raw = adapter.predict_image(ipath, prompt=prompt, max_pixels=max_pixels)
+                pred_item_raw = adapter.predict_image(ipath, prompt=prompt, max_pixels=max_pixels, **generation_kwargs)
                 pred_item = {
                     "cache_key": cache_key,
                     "image_id": iid,
@@ -365,7 +403,19 @@ def run_batch_inference(
         with open(predictions_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(pred_item, ensure_ascii=False) + "\n")
 
+    from collections import Counter
+    counts = dict(Counter(r.get('status', 'unexpected') for r in results))
+    failed = sum(counts.get(k, 0) for k in ('inference_failed', 'partial_failed', 'failed'))
+    tile_execution_failures = sum(r.get('tile_status_counts', {}).get('inference_failed', 0) for r in results)
     manifest_record = {
+        "execution_status": "partial_failed" if failed or tile_execution_failures else "completed",
+        "status_counts": counts,
+        "formal_eligibility": "canonical_protocol",
+        "protocol": protocol,
+        "model_content_sha256": base_identity,
+        "split_sha256": sha256(splits_path),
+        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+        "adapter_sha256": get_adapter_hash(adapter_dir),
         "run_id": run_id,
         "split_name": split_name,
         "model_id": model_id,
@@ -437,6 +487,8 @@ def run_batch_inference(
         print(f"Evaluation metrics saved to: {eval_out}")
         print(f"Official COCO AP50: {official_coco.get('AP_50', 0.0)}, mAP50:95: {official_coco.get('mAP_50_95', 0.0)}")
 
+    with open(manifest_out, "w", encoding="utf-8") as stream:
+        json.dump(manifest_record, stream, indent=2, ensure_ascii=False)
     return manifest_record
 
 
@@ -461,11 +513,12 @@ def main():
     parser.add_argument("--model-family", type=str, default="qwen", choices=["qwen", "deepseek"], help="Model family to run.")
     parser.add_argument("--prompt", type=str, default=None, help="Custom prompt string.")
     parser.add_argument("--prompt-type", type=str, default="original", choices=["original", "improved"], help="Prompt strategy preset.")
+    parser.add_argument("--protocol", default=None, help="Frozen protocol YAML; changed settings require a new protocol")
     args = parser.parse_args()
 
     parsed_image_ids = [int(x.strip()) for x in args.image_ids.split(",") if x.strip()] if args.image_ids else None
 
-    run_batch_inference(
+    result = run_batch_inference(
         manifest_path=args.manifest,
         splits_path=args.splits,
         split_name=args.split_name,
@@ -484,8 +537,12 @@ def main():
         limit=args.limit,
         no_cache=args.no_cache,
         prompt_text=args.prompt,
-        prompt_type=args.prompt_type
+        prompt_type=args.prompt_type,
+        protocol_path=args.protocol
     )
+
+    if result["execution_status"] != "completed":
+        sys.exit(2)
 
 
 if __name__ == "__main__":

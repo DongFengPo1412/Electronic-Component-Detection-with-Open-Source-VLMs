@@ -242,8 +242,9 @@ class TestEvaluator(unittest.TestCase):
             # Case 5: Valid, fully verified, disjoint provenance
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({"split_sha256": "canonical_hash", "train_boards": ["board_A", "board_B"]}, f)
-            # Should not raise any error
-            verify_lora_adapter_provenance(tmpdir, "canonical_hash", ["board_C", "board_D"])
+            # Hash + board claims alone are insufficient for formal P0 provenance.
+            with self.assertRaises(ValueError):
+                verify_lora_adapter_provenance(tmpdir, "canonical_hash", ["board_C", "board_D"])
 
     def test_nan_and_inf_box_rejected(self):
         self.assertFalse(is_valid_box([float("nan"), 10, 50, 50]))

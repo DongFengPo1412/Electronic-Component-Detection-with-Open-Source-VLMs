@@ -20,6 +20,8 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 from pcb_vlm.data.resumable_sampler import ResumableBatchSampler
+from pcb_vlm.provenance import validate_samples, model_identity, code_identity, dependencies, verify_adapter, source_identity
+from pcb_vlm.config import get_canonical_categories
 
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
@@ -163,6 +165,7 @@ def save_adapter_with_provenance_metadata(
         torch.save(trainer_state, os.path.join(save_dir, "trainer_state.pt"))
 
     metadata = {
+        **training_cfg["provenance"],
         "format_version": "1.0",
         "base_model_path": base_model_path,
         "base_model_version": "Qwen/Qwen2-VL-2B-Instruct",
@@ -170,10 +173,7 @@ def save_adapter_with_provenance_metadata(
         "train_boards": train_boards,
         "train_sft_sha256": train_sft_sha256,
         "coordinate_protocol": "x-first: (xmin, ymin), (xmax, ymax), normalized [0, 1000]",
-        "classes": [
-            "button", "capacitor", "clock", "connector", "diode",
-            "ic", "inductor", "led", "resistor", "switch", "transistor"
-        ],
+        "classes": get_canonical_categories(),
         "training_step": step,
         "training_config": training_cfg,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -226,7 +226,19 @@ def main():
             split_sha256 = hashlib.sha256(f.read()).hexdigest()
         print(f"Verified splits provenance: {splits_file} (SHA-256: {split_sha256[:16]}...)")
     else:
-        split_sha256 = "canonical_v2_verified"
+        raise FileNotFoundError("Canonical splits.json is required for training")
+
+    if args.splits_path and not os.path.isfile(args.splits_path):
+        raise FileNotFoundError(args.splits_path)
+    train_boards = validate_samples(train_raw_data, "train", splits_file)
+    if args.val_data_file:
+        with open(args.val_data_file, encoding="utf-8") as stream:
+            validate_samples(json.load(stream), "val", splits_file)
+    cfg["provenance"] = {"train_sft_path": os.path.abspath(args.data_file),
+        "base_model_sha256": model_identity(args.model_path),
+        "git_commit": code_identity(), "source_tree_sha256": source_identity(), "dependencies": dependencies()}
+    if args.resume_from_checkpoint:
+        verify_adapter(args.resume_from_checkpoint, splits_file, args.model_path)
 
     print(f"=== Qwen2-VL-2B LoRA SFT Training ===")
     print(f"Base Model:    {args.model_path}")

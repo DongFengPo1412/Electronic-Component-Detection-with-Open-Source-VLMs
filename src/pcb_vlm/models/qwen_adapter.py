@@ -17,10 +17,8 @@ import torch
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from peft import PeftModel
 
-DEFAULT_PCB_CLASSES = [
-    "button", "capacitor", "clock", "connector", "diode",
-    "ic", "inductor", "led", "resistor", "switch", "transistor"
-]
+from pcb_vlm.config import get_canonical_categories
+DEFAULT_PCB_CLASSES = get_canonical_categories()
 
 
 class QwenAdapter:
@@ -298,7 +296,8 @@ class QwenAdapter:
         image_input: Any,
         prompt: Optional[str] = None,
         max_new_tokens: int = 1024,
-        max_pixels: int = 1280 * 28 * 28
+        max_pixels: int = 1280 * 28 * 28,
+        **kwargs
     ) -> Dict[str, Any]:
         from qwen_vl_utils import process_vision_info
 
@@ -344,7 +343,7 @@ class QwenAdapter:
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                repetition_penalty=1.25,
+                repetition_penalty=kwargs.get("repetition_penalty", 1.25),
                 use_cache=True
             )
 

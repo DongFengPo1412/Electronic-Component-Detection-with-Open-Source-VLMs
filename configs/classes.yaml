@@ -1,6 +1,6 @@
 # Electronic Component Detection Classes Specification
 # Version: 1.0.0
-# Dataset Source: pcb_wacv_2019 / Georgia Tech & FPIC
+# Dataset Source: pcb_wacv_2019 / Georgia Tech RIPL WACV 2019 (not FPIC/FICS-PCB)
 
 categories:
   - id: 1
