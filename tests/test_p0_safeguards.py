@@ -69,6 +69,30 @@ class P0Tests(unittest.TestCase):
             f=Path(d)/'bad.yaml'; f.write_text(yaml.safe_dump({'dataset_canonical_dir':d,'test_split':{'image_ids':[999],'boards':[]},'categories':get_canonical_categories()}))
             with patch.object(pv,'read_json',return_value={'splits':{'test':{'image_ids':[1],'boards':[]}}}),patch.object(pv,'validate_partition'):
                 with self.assertRaisesRegex(ValueError,'Frozen test split'): pv.load_protocol(f)
+    def test_enriched_protocol_tampered_hash_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            import yaml
+            d = Path(d)
+            (d / 'splits.json').write_text('{}')
+            (d / 'coco_annotations.json').write_text('{}')
+            (d / 'images_manifest.json').write_text('[]')
+            cats = [{'id': i + 1, 'name': n, 'chinese_name': n} for i, n in enumerate(get_canonical_categories())]
+            proto = {
+                'dataset_canonical_dir': str(d),
+                'test_split': {'image_ids': [1], 'boards': ['b1']},
+                'categories': get_canonical_categories(),
+                'generation': {'max_pixels': 602112, 'repetition_penalty': 1.25},
+                'annotations_sha256': pv.sha256(d / 'coco_annotations.json'),
+                'split_sha256': pv.sha256(d / 'splits.json'),
+                'final_protocol_hash': '0' * 64,
+            }
+            f = d / 'tampered.yaml'
+            f.write_text(yaml.safe_dump(proto))
+            with patch.object(pv, 'read_json', side_effect=[{'splits': {'test': {'image_ids': [1], 'boards': ['b1']}}}, [], {'categories': cats}]), \
+                 patch.object(pv, 'validate_partition'), \
+                 patch('pcb_vlm.config.get_category_definitions', return_value=cats):
+                with self.assertRaisesRegex(ValueError, 'final_protocol_hash mismatch'):
+                    pv.load_protocol(f)
     def test_failed_inference_is_not_completed(self):
         # Inspect the real output path through a lightweight mocked adapter, no VLM weights loaded.
         with tempfile.TemporaryDirectory() as d:

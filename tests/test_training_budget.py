@@ -70,5 +70,33 @@ class LastVsBestResumeTest(unittest.TestCase):
   state=torch.load(second/'final_adapter/trainer_state.pt',weights_only=False)
   self.assertEqual(state['step'],2); self.assertEqual(state['scheduler_state_dict']['last_epoch'],2)
   self.assertEqual(state['best_adapter_source'],str((first/'best_adapter').resolve()))
+ def test_resume_at_target_step_saves_final_without_unbound_error(self):
+  import contextlib,io,yaml
+  from safetensors.torch import save_file,load_file
+  import train_lora
+  class TinyAdapter(torch.nn.Module):
+   def __init__(self):
+    super().__init__(); self.base_layer=torch.nn.Linear(2,2,bias=False); self.base_layer.weight.requires_grad_(False); self.lora_B=torch.nn.Linear(2,2,bias=False); self.config=MagicMock()
+   def forward(self,**kwargs):
+    return type('Output',(),{'loss':(self.lora_B.weight-1).square().mean()})()
+   def gradient_checkpointing_enable(self): pass
+   def print_trainable_parameters(self): pass
+   def get_nb_trainable_parameters(self): return (4,8)
+   def save_pretrained(self,path): save_file({'lora_B.weight':self.lora_B.weight.detach().cpu().contiguous()},str(Path(path)/'adapter_model.safetensors'))
+  def reload(model,path,**kwargs):
+   model.lora_B.weight.data.copy_(load_file(str(Path(path)/'adapter_model.safetensors'))['lora_B.weight']); return model
+  cfg={'lora':{},'training':{'learning_rate':0.001,'gradient_accumulation_steps':1,'save_steps':1},'data':{'max_length':4}}
+  conf=self.root/'config.yaml'; conf.write_text(yaml.safe_dump(cfg)); split=self.root/'splits.json'; split.write_text('{}')
+  self.processor.tokenizer.pad_token_id=0
+  first=self.root/'first_zero'; second=self.root/'second_zero'
+  common=['train_lora','--model-path','toy','--data-file',str(self.file),'--val-data-file',str(self.file),'--splits-path',str(split),'--config',str(conf),'--max-steps','1','--eval-steps','1','--device','cpu']
+  patches=[patch.object(train_lora.Qwen2VLForConditionalGeneration,'from_pretrained',side_effect=lambda *a,**k:TinyAdapter()),patch.object(train_lora.AutoProcessor,'from_pretrained',return_value=self.processor),patch.object(train_lora,'get_peft_model',side_effect=lambda m,c:m),patch.object(train_lora.PeftModel,'from_pretrained',side_effect=reload),patch('peft.get_peft_model_state_dict',side_effect=lambda m:{'lora_B.weight':m.lora_B.weight}),patch.object(train_lora,'validate_samples',return_value=['toy']),patch.object(train_lora,'model_identity',return_value='toy-content'),patch.object(train_lora,'source_identity',return_value='toy-source'),patch.object(train_lora,'code_identity',return_value='toy-commit'),patch.object(train_lora,'dependencies',return_value={}),patch.object(train_lora,'verify_adapter',side_effect=lambda path,*a:json.loads((Path(path)/'adapter_metadata.json').read_text())),patch.object(train_lora,'process_vision_info',return_value=([],None)),patch('torch.cuda.is_available',return_value=False)]
+  with contextlib.ExitStack() as stack,contextlib.redirect_stdout(io.StringIO()):
+   for item in patches: stack.enter_context(item)
+   with patch.object(sys,'argv',common+['--output-dir',str(first)]): train_lora.main()
+   with patch.object(sys,'argv',common+['--output-dir',str(second),'--resume-from-checkpoint',str(first/'checkpoint-1')]): train_lora.main()
+  self.assertTrue((second/'final_adapter/trainer_state.pt').is_file())
+  state=torch.load(second/'final_adapter/trainer_state.pt',weights_only=False)
+  self.assertEqual(state['step'],1)
 
 if __name__=='__main__': unittest.main()

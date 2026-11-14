@@ -434,6 +434,7 @@ def main():
     start_epoch = 0
     start_batch_in_epoch = 0
     resumed_permutation = None
+    trainer_state_payload = None
 
     if args.resume_from_checkpoint:
         state_file = os.path.join(args.resume_from_checkpoint, "trainer_state.pt")
@@ -442,6 +443,7 @@ def main():
         if os.path.exists(state_file):
             print(f"Loading trainer state from {state_file}...")
             state = torch.load(state_file, map_location="cpu", weights_only=False)
+            trainer_state_payload = state
             required_state = ('step','optimizer_state_dict','scheduler_state_dict','rng_state','epoch','batch_in_epoch','epoch_indices','total_batches_processed','python_rng_state','numpy_rng_state')
             if any(k not in state for k in required_state):
                 raise ValueError('Incomplete resume state; refusing partial recovery')
@@ -467,13 +469,26 @@ def main():
                 torch.cuda.set_rng_state(state["cuda_rng_state"].cpu())
                 print("Restored CUDA RNG state.")
 
-            history_file = os.path.join(os.path.dirname(args.resume_from_checkpoint), "training_history.json")
+            ckpt_parent = os.path.dirname(args.resume_from_checkpoint)
+            history_file = os.path.join(ckpt_parent, "training_history.json")
+            history_jsonl = os.path.join(ckpt_parent, "training_history.jsonl")
             if os.path.exists(history_file):
                 try:
                     with open(history_file, "r", encoding="utf-8") as f:
-                        history = json.load(f)
-                    history = [h for h in history if h.get("step", 0) <= step]
-                except Exception:
+                        loaded_history = json.load(f)
+                    if not isinstance(loaded_history, list):
+                        raise ValueError("training_history.json must contain a list")
+                    history = [h for h in loaded_history if h.get("step", 0) <= step]
+                except Exception as exc:
+                    print(f"Warning: failed to load {history_file} ({exc}); starting with empty history.")
+                    history = []
+            elif os.path.exists(history_jsonl):
+                try:
+                    with open(history_jsonl, "r", encoding="utf-8") as f:
+                        loaded_history = [json.loads(line) for line in f if line.strip()]
+                    history = [h for h in loaded_history if h.get("step", 0) <= step]
+                except Exception as exc:
+                    print(f"Warning: failed to load {history_jsonl} ({exc}); starting with empty history.")
                     history = []
         else:
             print(f"Warning: {state_file} not found. Resumed LoRA weights only; optimizer starts fresh.")
@@ -490,6 +505,8 @@ def main():
     window_lengths = []
 
     for epoch in range(start_epoch, 100):
+        if step >= effective_stop:
+            break
         if epoch == start_epoch and start_batch_in_epoch > 0:
             batch_sampler.set_epoch(epoch, start_batch_idx=start_batch_in_epoch, permutation=resumed_permutation)
         else:

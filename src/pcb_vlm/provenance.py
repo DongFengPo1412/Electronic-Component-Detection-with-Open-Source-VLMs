@@ -164,8 +164,16 @@ def load_protocol(path=None):
     if {(c['id'], c['name']) for c in coco['categories']} != {(c['id'], c['name']) for c in definitions}:
         raise ValueError('Canonical annotation category IDs differ from classes.yaml')
     data['category_definitions'] = [{k:c[k] for k in ('id','name','chinese_name')} for c in definitions]
-    data['annotations_sha256'] = sha256(coco_path)
-    data['split_sha256'] = sha256(split_path)
+    actual_ann_sha = sha256(coco_path)
+    actual_split_sha = sha256(split_path)
+    if 'annotations_sha256' in data and data['annotations_sha256'] != actual_ann_sha:
+        raise ValueError('Frozen protocol annotations_sha256 mismatch')
+    if 'split_sha256' in data and data['split_sha256'] != actual_split_sha:
+        raise ValueError('Frozen protocol split_sha256 mismatch')
+    already_enriched = 'annotations_sha256' in data and 'split_sha256' in data and 'final_protocol_hash' in data
+    recorded_hash = data.get('final_protocol_hash')
+    data['annotations_sha256'] = actual_ann_sha
+    data['split_sha256'] = actual_split_sha
     data['generation'].setdefault('max_pixels', 602112)
     data['generation'].setdefault('repetition_penalty', 1.25)
     data.setdefault('coordinate_protocols', {'qwen': 'xyxy_norm1000', 'deepseek': 'yxyx_norm1000'})
@@ -173,7 +181,10 @@ def load_protocol(path=None):
     if any(value not in PROTOCOLS for value in data['coordinate_protocols'].values()):
         raise ValueError('Unsupported explicit coordinate protocol')
     data.pop('final_protocol_hash', None)
-    data['final_protocol_hash'] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    computed_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    if already_enriched and recorded_hash != computed_hash:
+        raise ValueError('Frozen protocol final_protocol_hash mismatch; protocol file may be modified')
+    data['final_protocol_hash'] = computed_hash
     return data
 
 def code_identity():

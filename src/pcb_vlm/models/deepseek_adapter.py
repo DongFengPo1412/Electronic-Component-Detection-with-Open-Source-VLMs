@@ -30,10 +30,17 @@ class DeepSeekAdapter:
         torch_dtype = torch.bfloat16,
         cache_dir: Optional[str] = None
     ):
+        default_deepseek = os.environ.get(
+            "PCB_VLM_DEEPSEEK_PATH",
+            os.path.join(
+                os.environ.get("PCB_VLM_CACHE_ROOT", r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024"),
+                "models", "models", "deepseek-ai--deepseek-vl-1.3b-chat", "snapshots", "master",
+            ),
+        )
         known_aliases = {
-            "deepseek-ai/deepseek-vl-1.3b-chat": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
-            "deepseek-vl-1.3b": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master",
-            "deepseek": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\deepseek-ai--deepseek-vl-1.3b-chat\snapshots\master"
+            "deepseek-ai/deepseek-vl-1.3b-chat": default_deepseek,
+            "deepseek-vl-1.3b": default_deepseek,
+            "deepseek": default_deepseek,
         }
         requested = model_path or model_id or "deepseek-ai/deepseek-vl-1.3b-chat"
         self.requested_model = requested

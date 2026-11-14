@@ -32,10 +32,17 @@ class QwenAdapter:
         torch_dtype = torch.bfloat16,
         cache_dir: Optional[str] = None
     ):
+        default_qwen = os.environ.get(
+            "PCB_VLM_QWEN_PATH",
+            os.path.join(
+                os.environ.get("PCB_VLM_CACHE_ROOT", r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024"),
+                "models", "models", "Qwen--Qwen2-VL-2B-Instruct", "snapshots", "master",
+            ),
+        )
         known_aliases = {
-            "Qwen/Qwen2-VL-2B-Instruct": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master",
-            "qwen2-vl-2b": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master",
-            "qwen": r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master"
+            "Qwen/Qwen2-VL-2B-Instruct": default_qwen,
+            "qwen2-vl-2b": default_qwen,
+            "qwen": default_qwen,
         }
 
         requested = model_path or model_id or "Qwen/Qwen2-VL-2B-Instruct"

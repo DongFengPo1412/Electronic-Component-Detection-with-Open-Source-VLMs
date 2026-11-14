@@ -95,7 +95,7 @@ def evaluate_run_at_thresholds(predictions_file, coco_file, test_image_ids, thre
     }
 
 
-def verify_lora_adapter_provenance(lora_adapter_dir: str, splits_sha256: str, test_boards: List[str]):
+def verify_lora_adapter_provenance(lora_adapter_dir: str, splits_sha256: str, test_boards: List[str], protocol_path: Optional[str] = None):
     """Strictly verify LoRA adapter provenance against canonical split hash and boards."""
     if not lora_adapter_dir:
         return
@@ -159,7 +159,7 @@ def verify_lora_adapter_provenance(lora_adapter_dir: str, splits_sha256: str, te
         )
 
     from pcb_vlm.provenance import load_protocol, verify_adapter, sha256
-    protocol = load_protocol()
+    protocol = load_protocol(protocol_path)
     split_path = os.path.join(protocol['dataset_canonical_dir'], 'splits.json')
     if sha256(split_path) != splits_sha256 or set(test_boards) != set(protocol['test_split']['boards']):
         raise ValueError('Provenance check does not use the frozen split')
@@ -173,16 +173,17 @@ def main():
     parser.add_argument("--coco", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\annotations_v2_canonical\coco_annotations.json", help="Path to coco_annotations.json")
     parser.add_argument("--output-dir", default=r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\runs\stage16_canonical_test_matrix", help="Base output directory")
     parser.add_argument("--lora-adapter", default=None, help="Optional newly trained canonical LoRA adapter path")
+    parser.add_argument("--protocol", default=os.path.join(os.path.dirname(__file__), "..", "configs", "frozen_protocol.yaml"), help="Frozen protocol YAML path")
     args = parser.parse_args()
 
     splits_file = args.splits
     manifest_file = args.manifest
     coco_file = args.coco
     out_base_dir = args.output_dir
-    base_model = r"C:\Users\Liu\.codex\cache\tasks\pcb-vlm-antigravity-20261024\models\models\Qwen--Qwen2-VL-2B-Instruct\snapshots\master"
     lora_adapter = args.lora_adapter
     from pcb_vlm.provenance import load_protocol, verify_adapter
-    protocol = load_protocol()
+    protocol = load_protocol(args.protocol)
+    base_model = protocol["models"]["qwen_base"]
     if hashlib.sha256(open(splits_file, "rb").read()).hexdigest() != protocol["split_sha256"]:
         raise ValueError("Matrix split differs from frozen protocol")
     if lora_adapter:
@@ -203,7 +204,7 @@ def main():
 
     # Strict Data Contamination Verification
     if lora_adapter:
-        verify_lora_adapter_provenance(lora_adapter, splits_sha256, test_boards)
+        verify_lora_adapter_provenance(lora_adapter, splits_sha256, test_boards, protocol_path=args.protocol)
 
     experiments = [
         {
@@ -287,7 +288,7 @@ def main():
     }
 
     for experiment in experiments:
-        experiment["args"].extend(["--protocol", os.path.join(os.path.dirname(__file__), "..", "configs", "frozen_protocol.yaml")])
+        experiment["args"].extend(["--protocol", args.protocol])
     all_experiments_successful = True
     for exp in experiments:
         success, dur = run_test_experiment(f"{exp['id']} ({exp['name']})", exp["args"])

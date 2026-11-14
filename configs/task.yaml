@@ -1,5 +1,5 @@
 # Task Definition for Electronic-Component-Detection-with-Open-Source-VLMs
-# Version: 2.3-canonical-verified
+# Version: 3.0-semantic-verified
 task_name: "Electronic-Component-Detection-with-Open-Source-VLMs"
 thesis_title_zh: "基于开源视觉语言大模型的电子元器件检测"
 
@@ -7,7 +7,7 @@ task_definition:
   dataset_name: "Georgia Tech RIPL PCB WACV 2019"
   input_type: "已装配印刷电路板（PCB）高分辨率可见光图像"
   output_type: "电子元器件类别标签及水平矩形边界框像素坐标 [x1, y1, x2, y2]"
-  splits_source: "annotations_v2_canonical/splits.json"
+  splits_source: "annotations_v3_semantic/splits.json (historical baseline: annotations_v2_canonical/splits.json)"
   split_policy: "按物理PCB板卡严格划分（Train/Val/Test板卡完全互斥，零数据污染）"
 
 canonical_categories:
@@ -52,9 +52,10 @@ coordinate_protocol:
     normalization: "[0, 1000] 归一化整型/浮点坐标"
     coordinate_order: "x-first: (xmin, ymin), (xmax, ymax)"
   deepseek_vlm_protocol:
-    format: "<|ref|>{label}<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>"
+    format: "label [ymin, xmin, ymax, xmax] (DeepSeek-VL-1.3B-chat numeric prompt contract; VL2 <|ref|>/<|det|> syntax rejected)"
     normalization: "[0, 1000] 归一化坐标"
-    conversion: "统一经由 parse_grounding_output_with_status 转换为原图像素 xyxy"
+    coordinate_order: "y-first: [ymin, xmin, ymax, xmax]"
+    conversion: "统一经由 coordinate_protocol.parse_response(protocol='yxyx_norm1000') 转换为原图像素 xyxy"
 
 models:
   primary_vlm:
