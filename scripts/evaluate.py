@@ -11,7 +11,7 @@ Implements:
 import os
 import json
 import argparse
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Sequence
 import numpy as np
 
 
@@ -297,6 +297,65 @@ def scope_ground_truth(gt, expected):
             'annotations':[a for a in gt.get('annotations', []) if str(a['image_id']) in ids]}
 
 
+def match_category_predictions_one_to_one(
+    gts_cat: Sequence[Dict[str, Any]],
+    preds_cat: Sequence[Dict[str, Any]],
+    iou_threshold: float = 0.50,
+) -> Dict[str, Any]:
+    """Match predictions to GTs within one category using evaluate_detections greedy order.
+
+    Predictions are sorted stably by ``score`` descending (or box area when ``score``
+    is ``None``). Each prediction is greedily paired with the unmatched GT in the same
+    category that maximizes IoU strictly (`>`), accepting the match when
+    ``best_iou >= iou_threshold``.
+    """
+    matched_gts = set()
+    pred_to_gt: Dict[int, Tuple[int, float]] = {}
+    gt_to_pred: Dict[int, Tuple[int, float]] = {}
+    matched_pairs: List[Tuple[int, int, float]] = []
+
+    preds_sorted = sorted(
+        enumerate(preds_cat),
+        key=lambda item: (
+            item[1]["score"]
+            if item[1].get("score") is not None
+            else (item[1]["bbox"][2] - item[1]["bbox"][0]) * (item[1]["bbox"][3] - item[1]["bbox"][1])
+        ),
+        reverse=True,
+    )
+
+    tp = 0
+    fp = 0
+    for pred_idx, p in preds_sorted:
+        best_iou = 0.0
+        best_gt_idx = -1
+        for gt_idx, g in enumerate(gts_cat):
+            if gt_idx in matched_gts:
+                continue
+            iou = calculate_iou(p["bbox"], g["bbox"])
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gt_idx
+
+        if best_iou >= iou_threshold and best_gt_idx != -1:
+            tp += 1
+            matched_gts.add(best_gt_idx)
+            pred_to_gt[pred_idx] = (best_gt_idx, float(best_iou))
+            gt_to_pred[best_gt_idx] = (pred_idx, float(best_iou))
+            matched_pairs.append((pred_idx, best_gt_idx, float(best_iou)))
+        else:
+            fp += 1
+
+    return {
+        "matched_pairs": matched_pairs,
+        "pred_to_gt": pred_to_gt,
+        "gt_to_pred": gt_to_pred,
+        "tp": tp,
+        "fp": fp,
+        "fn": len(gts_cat) - len(matched_gts),
+    }
+
+
 def evaluate_detections(
     gt_data: Dict[str, Any],
     pred_data: Dict[str, Any],
@@ -370,32 +429,11 @@ def evaluate_detections(
                 cat_stats[cat]["fn"] += len(gts_cat)
                 continue
 
-            # Greedy one-to-one matching
-            matched_gts = set()
-            preds_sorted = sorted(
-                preds_cat,
-                key=lambda p: p["score"] if p["score"] is not None else (p["bbox"][2]-p["bbox"][0])*(p["bbox"][3]-p["bbox"][1]),
-                reverse=True
-            )
-
-            for p in preds_sorted:
-                best_iou = 0.0
-                best_gt_idx = -1
-                for idx, g in enumerate(gts_cat):
-                    if idx in matched_gts:
-                        continue
-                    iou = calculate_iou(p["bbox"], g["bbox"])
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_gt_idx = idx
-
-                if best_iou >= iou_threshold and best_gt_idx != -1:
-                    cat_stats[cat]["tp"] += 1
-                    matched_gts.add(best_gt_idx)
-                else:
-                    cat_stats[cat]["fp"] += 1
-
-            cat_stats[cat]["fn"] += (len(gts_cat) - len(matched_gts))
+            # Greedy one-to-one matching (canonical helper shared with showcase/replay)
+            match_res = match_category_predictions_one_to_one(gts_cat, preds_cat, iou_threshold=iou_threshold)
+            cat_stats[cat]["tp"] += match_res["tp"]
+            cat_stats[cat]["fp"] += match_res["fp"]
+            cat_stats[cat]["fn"] += match_res["fn"]
 
     # Compute Precision, Recall, F1
     total_tp = sum(s["tp"] for s in cat_stats.values())

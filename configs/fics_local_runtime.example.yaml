@@ -1,0 +1,36 @@
+# Example runtime path configuration for scripts/run_fics_matrix.py
+# Copy to a local untracked file (e.g., configs/fics_local_runtime.yaml) and fill in your local paths.
+# Never commit machine-specific weights or personal cache paths as hard defaults.
+# Note: Only local path/runtime fields (local_dir, overlay_dir, hf_home, python_executable,
+# require_overlay, path_remaps, image_roots) may vary here. Frozen identity fields such as
+# repo_id, revision, attn_implementation, and visual_budget must match the frozen plan if specified.
+# Also, scripts/run_fics_matrix.py defaults to CPU dry-run; pass --execute to run GPU workers.
+
+hf_home: "/path/to/hf_cache"
+temp_dir: "/path/to/tmp_work"
+
+# Optional global python executable override (defaults to current sys.executable)
+python_executable: "python"
+
+models:
+  qwen2:
+    repo_id: "Qwen/Qwen2-VL-2B-Instruct"
+    local_dir: "/path/to/models/Qwen--Qwen2-VL-2B-Instruct"
+    attn_implementation: "sdpa"
+  deepseek:
+    repo_id: "deepseek-ai/deepseek-vl-1.3b-chat"
+    local_dir: "/path/to/models/deepseek-ai--deepseek-vl-1.3b-chat"
+    attn_implementation: "native_deepseek_vl"
+  qwen3:
+    repo_id: "Qwen/Qwen3-VL-2B-Instruct"
+    local_dir: "/path/to/models/Qwen--Qwen3-VL-2B-Instruct"
+    attn_implementation: "sdpa"
+    # Qwen3-VL requires newer transformers; provide an isolated overlay site-packages or separate python_executable
+    overlay_dir: "/path/to/qwen3-dependency-overlay"
+    hf_home: "/path/to/qwen3-hf-home"
+    require_overlay: true
+
+# Optional path remapping when executing a historical frozen_plan.json on relocated images
+path_remaps: []
+image_roots: []
+

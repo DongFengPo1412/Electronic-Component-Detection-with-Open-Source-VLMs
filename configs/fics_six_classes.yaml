@@ -1,0 +1,40 @@
+# FICS-PCB DSLR 6-Class Detection & CPU Replay Specification
+# Strictly decoupled from the legacy 11-class WACV 2019 ontology (`configs/classes.yaml`).
+
+dataset: "FICS-PCB-DSLR"
+protocol_version: "fics_dslr_eval_v2"
+source_reference: "https://eprint.iacr.org/2020/366.pdf"
+
+classes:
+  - id: 1
+    name: "capacitor"
+    raw_type: "capacitors"
+  - id: 2
+    name: "resistor"
+    raw_type: "resistors"
+  - id: 3
+    name: "inductor"
+    raw_type: "inductors"
+  - id: 4
+    name: "transistor"
+    raw_type: "transistors"
+  - id: 5
+    name: "diode"
+    raw_type: "diodes"
+  - id: 6
+    name: "ic"
+    raw_type: "ICs"
+
+protocol:
+  coordinate_protocol: "xyxy_norm1000"
+  nms_iou_threshold: 0.50
+  eval_iou_threshold: 0.50
+  max_new_tokens_practical: 512
+  confidence_score_policy: "uniform score=1.0 (uncalibrated; AP50/mAP50:95 are supplemental)"
+  prompt: "Locate all visible electronic components belonging to these classes: capacitor, resistor, inductor, transistor, diode, ic. Return a JSON array of objects with keys bbox_2d and label. Each bbox_2d must be [xmin, ymin, xmax, ymax], normalized to [0, 1000] relative to this input image. Use exactly one of the listed class names for each object. If no target components are visible, return []. Do not include explanations."
+  prompt_sha256: "e46d61e2042c5da503101cf06bd577a7b4ebdaaa7d135b033b27866d6b53aae7"
+
+eos_token_ids_by_model:
+  qwen2: [151645, 151643]
+  qwen3: [151645, 151643]
+  deepseek: [100001]
