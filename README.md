@@ -67,7 +67,11 @@ python scripts/replay_fics_eval.py \
 > 注：默认拒绝覆盖任何已存在文件或输入路径；支持通过 `--path-map OLD=NEW` 与 `--image-root DIR` 在离线证据包中重定位图像并执行 `--verify-disk-hashes`。
 
 ### 3.3 集成推理入口验证（默认 CPU `--dry-run` 与显式 `--execute`）
-`scripts/run_fics_matrix.py` 由已验证的外部 GPU matrix runner 整合迁移进仓库。**截至当前版本，该集成入口已完成 CPU 合同测试、假 worker 看门狗/退出码/路径映射测试与 `--dry-run` 冻结计划核对，但尚未在集成后重新执行真实 GPU 推理复验。**为防止误触 GPU，CLI 与 Python API 现均**默认运行 CPU `--dry-run`**（仅在显式传入 `--execute` / `dry_run=False` 时才执行 GPU 探针与 worker）；且 `--runtime-config` 仅允许覆盖本地路径与运行环境，严禁修改冻结 `repo_id`、`revision`、`attn_implementation`、`visual_budget` 与队列配置。
+`scripts/run_fics_matrix.py` 由已验证的外部 GPU matrix runner 整合迁移进仓库。基于本地提交 `376011b`，该集成入口已通过全仓 163 项 CPU 合同/回归测试、双份 `--dry-run` 核验，并已在 `RTX 4060 Laptop GPU (8 GB)` 上通过显式 `--execute --verify-input-hashes` 完成了三模型各 `1` 次（`qwen2 -> deepseek -> qwen3` 共 `3` 次调用、墙钟 `93.421 s`、退出码 `0`）的受控 **GPU 工程 Smoke 实测**，实证验证了仓库集成后的模型加载、图像处理、首步生成与 `logits` 有限性检查、原始记录落盘与来源 SHA-256 校验链路（独立审查回执见 `C:\Users\Liu\.codex\artifacts\pcb-fics-integration-smoke-review-20261115\independent_smoke_and_git.json` 及 `审查结论.md`）。
+
+> **集成测试边界声明**：本次 Smoke 仅验证单个冻结切片（`s18_front` `T00`）的端到端工程通路，**未在仓库集成后重跑完整 507 调用主矩阵（第 1 节 201+306 成绩仍来自已验收的正式回放，Smoke 结果不并入主成绩表）**；其中 `Qwen2` 可解析的 `6` 个框与 `Qwen3` 截断前恢复的 `14` 个框均仅代表结构化提取数量而非 `TP` 命中数，`DeepSeek` 在 `145` token 正常 EOS 后返回英文自然语言描述（`0` 个有效框）属于输出格式契约失败而非未执行。
+
+为防止误触 GPU，CLI 与 Python API 现均**默认运行 CPU `--dry-run`**（仅在显式传入 `--execute` / `dry_run=False` 时才执行 GPU 探针与 worker）；且 `--runtime-config` 仅允许覆盖本地路径与运行环境，严禁修改冻结 `repo_id`、`revision`、`attn_implementation`、`visual_budget` 与队列配置。
 
 1. 复制 [configs/fics_local_runtime.example.yaml](configs/fics_local_runtime.example.yaml) 为本地配置（如 `configs/fics_local_runtime.yaml`）并填入本地权重与 `qwen3` 依赖覆盖路径。
 2. 先执行 CPU 干跑检查计划、重映射图像与输出目录安全性（可省略 `--dry-run`，显式写明更清晰；与 `--execute` 互斥）：
