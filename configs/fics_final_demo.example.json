@@ -1,0 +1,11 @@
+{
+  "schema_version": "fics_final_demo_config_v1",
+  "config_role": "demo_server_startup_config",
+  "description": "Generic server startup JSON for scripts/fics_final_demo.py --config. Only controls server host/port, workspace_root, runtime YAML path, and research replay index path; model weight paths belong strictly in --runtime-config YAML (see configs/fics_local_runtime.example.yaml), and frozen inference/budget specs cannot be overridden here.",
+  "workspace_root": "/path/to/fics_demo_workspace",
+  "runtime_config": "/path/to/fics_local_runtime.yaml",
+  "results_index": "/path/to/results_index.json",
+  "host": "127.0.0.1",
+  "port": 7862,
+  "allow_port_fallback": true
+}

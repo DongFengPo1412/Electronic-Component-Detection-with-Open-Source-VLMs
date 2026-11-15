@@ -1,115 +1,101 @@
 # Electronic Component Detection with Open-Source VLMs
 
-面向印刷电路板（PCB）电子元器件定位与分类的开源视觉语言模型（VLM）评测与可复现研究仓库。当前主线聚焦 **FICS-PCB DSLR 6 类开放域多模型对照评测**（`capacitor`、`resistor`、`inductor`、`transistor`、`diode`、`ic`），提供从冻结实验计划、隔离式顺序推理、严格 `v2` 终止/契约解析、`IoU >= 0.50` 类感知评价到只读可视化回放的完整可验证链路。
+面向印刷电路板（PCB）电子元器件定位与分类的开源视觉语言模型（VLM）评测、二次候选核验与无真值演示系统仓库。当前最终主线聚焦 **FICS-PCB DSLR 正面图像 6 类开放域多模型对照评测**（`capacitor`、`resistor`、`inductor`、`transistor`、`diode`、`ic`），提供从冻结实验计划、双门限串行推理、`v2` 终止/契约解析、候选框局部裁剪二次核验（`B_other`）、`IoU >= 0.50` 类感知评价，到 **GT-free 新图上传整板检测 + 只读 8 板研究回放**的完整可复现链路。
 
-## 1. 当前主线结论与核心数字（统一 512-Token 实用预算）
+## 1. 最终主线实验设计、8 板数据划分与核心结论
 
-在统一任务契约（`xyxy_norm1000` JSON 数组、`max_new_tokens=512`、`do_sample=False`、同卡单步串行与双门限显存检查、不做预检丢弃与失败零填充）下，三款轻量级开源 VLM 在两个严格隔离的 FICS-PCB 样本集上的真实回放结果如下（完整自动生成表见 [docs/fics_results_tables.md](docs/fics_results_tables.md)）：
+在统一基础任务契约（`xyxy_norm1000` JSON 数组、`max_new_tokens=512`、`do_sample=False`、同卡单步串行与双门限显存检查、不做预检丢弃与失败零填充）与冻结二阶段局部核验规格（`B_other`：对 `Qwen3` 切片去重候选框做 `10%` 外扩裁剪与单选分类过滤，保留 `other` 以外全部 6 类候选且**严格保留原候选类别、坐标、`score=1.0` 与相对顺序**）下，8 张 FICS-PCB DSLR 正面图像（总计 **375 GT**，均保持原始 64 个设计系列边界）的严格隔离评测结果如下：
 
-### 1.1 开发集：`s18_front + s28_front`（201 次正式调用，每模型 67 次，共 64 GT）
+### 1.1 历史基准与开发扩展阶段（6 张已观察参考图，共 268 GT；非最终盲测）
+- **历史初始参考（`s18_front + s28_front`，64 GT，201 次三模型基础调用）**：Qwen3 切片 `T` 在 64 GT 上取得 `19 TP / 257 FP / 45 FN`（`F1=11.18%`），优于整图 `W`（`7.50%`）与 Qwen2/DeepSeek 基线。
+- **前期未观察对照（`s29 + s27`，41 GT，306 次三模型基础调用）**：Qwen3 切片 `T` 虽将 Recall 从 `14.63%` 提升至 `29.27%`，但误报由 `16` 激增至 `235`，导致 F1 反由 `19.05%` 降至 `8.33%`（`diode` GT=0，Recall 记为 `N/A (GT=0)`），暴露高分辨率切片下的严重误报瓶颈。
+- **新增开发板方法选型（`s4 + s20`，163 GT，186 次三模型基础调用 + 521 次 Qwen3 二阶段开发核验）**：
+  - 基线 `Qwen3 T`：`19 TP / 502 FP / 144 FN`，`P=3.65%`，`R=11.66%`，`F1=5.56%`；
+  - 方案 `A`（切片一致性跨切片投票过滤）：`14 TP / 188 FP / 149 FN`，`P=6.93%`，`R=8.59%`，`F1=7.67%`；
+  - **预注册胜出并冻结方案 `B_other`**：`15 TP / 156 FP / 148 FN`，`P=8.77%`，`R=9.20%`，`F1=8.98%`（按预注册未舍入 micro-F1 胜出并冻结 10 项核心代码/配置 SHA-256）；
+  - 方案 `B_exact`（严格同类确认，阴性对照）：`9 TP / 51 FP / 154 FN`，`P=15.00%`，`R=5.52%`，`F1=8.07%`（召回损失过大）。
 
-| 模型 | 模式 | TP | FP | FN | Precision | Recall | F1 |
+### 1.2 最终独立保留盲测集（`s19 + s16`，107 GT；单次盲评，未作任何事后调参）
+三模型各自执行 `W=2, T=140`（batch 合计 `142` 次，三模型基础矩阵共 `426` 次调用）；冻结主方法 `Qwen3_T_plus_B_other` 实际执行 **`140` 次切片推理 + `508` 次去重候选裁剪核验**（剔除 `358` 个背景/非元器件 `other` 候选，保留 **`150`** 个最终预测框）：
+
+| 模型 | 模式 / 方法 | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `Qwen2-VL-2B-Instruct` | `W` (整 ROI) | 0 | 11 | 64 | 0.00% | 0.00% | 0.00% |
-| `Qwen2-VL-2B-Instruct` | `T` (切片+NMS) | 0 | 355 | 64 | 0.00% | 0.00% | 0.00% |
-| `deepseek-vl-1.3b-chat` | `W` (整 ROI) | 0 | 0 | 64 | 0.00% | 0.00% | 0.00% |
-| `deepseek-vl-1.3b-chat` | `T` (切片+NMS) | 0 | 6 | 64 | 0.00% | 0.00% | 0.00% |
-| `Qwen3-VL-2B-Instruct` | `W` (整 ROI) | 3 | 13 | 61 | 18.75% | 4.69% | 7.50% |
-| `Qwen3-VL-2B-Instruct` | `T` (切片+NMS) | **19** | **257** | **45** | **6.88%** | **29.69%** | **11.18%** |
+| `Qwen2-VL-2B-Instruct` | `W` (整 ROI) | 0 | 11 | 107 | 0.00% | 0.00% | 0.00% |
+| `Qwen2-VL-2B-Instruct` | `T` (切片+NMS) | 0 | 895 | 107 | 0.00% | 0.00% | 0.00% |
+| `deepseek-vl-1.3b-chat` | `W` (整 ROI) | 0 | 0 | 107 | 0.00% | 0.00% | 0.00% |
+| `deepseek-vl-1.3b-chat` | `T` (切片+NMS) | 0 | 0 | 107 | 0.00% | 0.00% | 0.00% |
+| `Qwen3-VL-2B-Instruct` | `W` (整 ROI) | 4 | 25 | 103 | **13.79%** | 3.74% | 5.88% |
+| `Qwen3-VL-2B-Instruct` | `T` (切片+NMS) | **12** | 496 | **95** | 2.36% | **11.21%** | 3.90% |
+| `Qwen3-VL-2B-Instruct` | **`T + B_other`（冻结主方法）** | 10 | **140** | 97 | 6.67% | 9.35% | **7.78%** (`7.7821%`) |
 
-### 1.2 未观察新板样本：`s29 + s27`（306 次正式调用，每模型 102 次，共 41 GT）
-
-| 模型 | 模式 | TP | FP | FN | Precision | Recall | F1 |
-|---|---|---:|---:|---:|---:|---:|---:|
-| `Qwen2-VL-2B-Instruct` | `W` (整 ROI) | 0 | 10 | 41 | 0.00% | 0.00% | 0.00% |
-| `Qwen2-VL-2B-Instruct` | `T` (切片+NMS) | 1 | 550 | 40 | 0.18% | 2.44% | 0.34% |
-| `deepseek-vl-1.3b-chat` | `W` (整 ROI) | 0 | 0 | 41 | 0.00% | 0.00% | 0.00% |
-| `deepseek-vl-1.3b-chat` | `T` (切片+NMS) | 0 | 0 | 41 | 0.00% | 0.00% | 0.00% |
-| `Qwen3-VL-2B-Instruct` | `W` (整 ROI) | 6 | 16 | 35 | **27.27%** | 14.63% | **19.05%** |
-| `Qwen3-VL-2B-Instruct` | `T` (切片+NMS) | **12** | 235 | 29 | 4.86% | **29.27%** | 8.33% |
-
-> **关键发现与严格边界声明**
-> - **切块（T）并非无条件优于整图（W）**：在 `s29+s27` 上，Qwen3 切块虽然将 Recall 从 `14.63%` 提升至 `29.27%`，但误报由 `16` 激增至 `235`，F1 反从 `19.05%` 降至 `8.33%`。
-> - **架构与输入预算差异导致零/低命中**：三模型本身处于不同参数量、视觉编码器分辨率处理（`DeepSeek-VL` 固定 `384x384` 等比填充至 `576` token，而 `Qwen2/Qwen3` 使用受控动态分辨率）及微调/指令对齐阶段，`DeepSeek-VL-1.3B` 在 512-token 下虽然多数调用正常结束 EOS，但几乎全部退化为自然语言描述而非严格 JSON；`Qwen2-VL-2B` 能生成格式框但坐标定位普遍偏移。
-> - **数据集口径、硬件与设计系列边界**：本文评测数据来自 **FICS-PCB**（Lu 等人，Cryptology ePrint Archive 2020/366，全集含 31 个样本 `s1..s31`、9,912 张 DSLR 与数字显微图像及 77,347 个标注；**切勿与仓内 `papers/01_FICS-PCB_FPIC_Dataset_2022.pdf` 中实际收录的 FPIC 数据集论文〔Jessurun 等人，arXiv:2202.08414 / ACM JETC 2023〕混淆**）。本项目仅评测其 **DSLR 正面图像子集中的 4 个样本板卡 / 4 张正面图像**（`s18_front` 为深色 IoT/RF MCU 开发板 `PO USI 850104 BM-09-S 573`，非 MK4；`s28_front` 为绿色 `ICLRT-EFI5 E-field Integrator MK5`；`s29` 与 `s27` 为同系列蓝色 `E-field Integrator MK4 RC03 - 2011 ICLRT`；未评测显微镜图像）。`s29+s27` 中 `diode` GT 数为 `0`，故其 Recall 记为 `N/A (GT=0)` 并如实统计 FP。全部 GPU 推理均在 **NVIDIA GeForce RTX 4060 Laptop GPU（8 GB 显存，`8188.0 MiB`）** 上单模型串行执行，峰值保留显存控制在 `4248–5040 MiB`（`4.1–4.9 GiB`）。不得将 4 块板卡小样本结果外推为“整套 FICS-PCB 数据集广泛泛化”或“统计学显著结论”。
+> **关键研究结论与严格边界声明**
+> - **误报抑制收益与召回代价并存**：在未见过任何参数调整的 `s19+s16` 上，`B_other` 将 `Qwen3 T` 的误报由 `496` 削减至 `140`（降幅 `71.77%`），Precision 由 `2.36%` 升至 `6.67%`，F1 由 `3.90%` 升至 `7.7821%`（同时超过 `W` 的 `5.88%`），但代价是真阳性由 `12` 降至 `10`（损失 `2` 个 TP）。开源轻量 VLM 在高密度 PCB 小目标零样本检测上仍远未达到工业可用精度。
+> - **调用计量透明**：基础研究矩阵 4 批合计 `201 + 306 + 186 + 426 = 1119` 次基础调用（另含开发核验 `521` 次、最终保留核验 `508` 次、早期 `24` 项诊断、`3` 次集成 Smoke 与功能演示实时验证），全部实验均未进行任何权重微调（训练次数 `= 0`）。
+> - **数据集与硬件边界**：评测数据来自 **FICS-PCB**（Lu 等人，Cryptology ePrint Archive 2020/366，全集含 31 样本、9,912 张 DSLR/显微图，请勿与仓内 `papers/01_FICS-PCB_FPIC_Dataset_2022.pdf` 收录的 FPIC 数据集论文混淆）。本文仅覆盖 **DSLR 正面子集 8 张图像（375 GT）**；所有推理在 **NVIDIA GeForce RTX 4060 Laptop GPU (8 GB, 8188 MiB)** 单卡串行完成，基础模型 `Qwen2/DeepSeek` 运行于 `transformers 4.46.3`，`Qwen3` 使用 `transformers 4.57.6` 隔离覆盖路径（`torch 2.5.1+cu121`）。不得将 2 块保留板差异外推为任意 PCB 设计家族通用泛化结论。
 
 ---
 
-## 2. 架构与协议文档及关键模块
+## 2. 架构、核心模块与演示闭环
 
 - 模型架构与实验协议说明：[docs/model_architectures_and_fics_protocol.md](docs/model_architectures_and_fics_protocol.md)
-- 自动汇总结果表（严禁手改数值）：[docs/fics_results_tables.md](docs/fics_results_tables.md)
+- 自动汇总结果表（历史 4 板参考）：[docs/fics_results_tables.md](docs/fics_results_tables.md)
 - FICS 6 类隔离配置：[configs/fics_six_classes.yaml](configs/fics_six_classes.yaml)
-- 本地推理运行路径模板：[configs/fics_local_runtime.example.yaml](configs/fics_local_runtime.example.yaml)
+- 模型本地权重与覆盖路径模板：[configs/fics_local_runtime.example.yaml](configs/fics_local_runtime.example.yaml)（对应 `--runtime-config`，含 `models` 与 `gpu_gate`）
+- 最终演示服务端启动配置模板：[configs/fics_final_demo.example.json](configs/fics_final_demo.example.json)（对应 `--config`，仅负责 `workspace_root`、`runtime_config`、`results_index`、`host`、`port`）
 - 关键源码模块：
-  - `src/pcb_vlm/data/fics_dslr.py` — FICS-PCB 官方元数据、XML/CSV 核对与 6 类隔离 COCO 构造
-  - `src/pcb_vlm/evaluation/fics_replay.py` — SHA-256 计划绑定、防覆盖校验、`v2` EOS/预算截断分离解析、逐板 NMS 与 `IoU>=0.50` 评测
-  - `src/pcb_vlm/inference/` (`gpu_gate.py`, `fics_worker.py`, `fics_matrix.py`) — 仓库化隔离推理执行器、双门限显存探针、超时/EOF 看门狗与防覆盖保护
+  - `src/pcb_vlm/data/fics_dslr.py` — FICS-PCB 官方元数据解析与 6 类隔离 COCO 构造
+  - `src/pcb_vlm/geometry/tiling.py` — GT-free 白边 ROI 检测（像素 `<248 + 32px` 边距）与 `1024px / 20%` 切片生成
+  - `src/pcb_vlm/evaluation/fics_replay.py` — SHA-256 计划绑定、`v2` 终止分离解析、`IoU >= 0.50` 类感知评价
+  - `src/pcb_vlm/evaluation/tile_consistency.py` & `scripts/eval_tile_consistency.py` — 开发集候选对照方法 `A`（跨切片一致性过滤）
+  - `src/pcb_vlm/evaluation/candidate_verifier.py` & `src/pcb_vlm/inference/candidate_verifier_runner.py` & `scripts/run_candidate_verifier.py` — 冻结方法 `B_other`（候选框 10% 外扩裁剪与二阶段分类核验）
+  - `src/pcb_vlm/evaluation/gt_free_pipeline.py` — 无 GT 上传图重映射、切片去重与 `B_other` 过滤导出链路
+  - `src/pcb_vlm/evaluation/final_demo_service.py` & `scripts/fics_final_demo.py` — 完整端到端演示后端与双页签 Web UI（无 GT 新图实时推理、可安全取消子进程树、可选事后 GT 身份核验与只读 8 板研究回放）
 
 ---
 
 ## 3. 常用命令与复现流程
 
-### 3.1 运行全量 CPU 单测与集成合同测试
+### 3.1 运行 CPU 合同与回归测试
 ```bash
+# 运行核心单元测试
 python -m unittest discover -s tests -v
-```
 
-### 3.2 可复现 CPU 回放评价（不依赖 GPU / 权重）
+# 运行演示服务、无 GT 管道与方法对比 pytest 套件
+python -m pytest tests/test_final_demo.py tests/test_gt_free_pipeline.py tests/test_candidate_verifier.py tests/test_tile_consistency.py -v
+```
+> 若同时设置环境变量 `FICS_HELDOUT_ARTIFACT_DIR` 与 `FICS_RESULTS_INDEX` 指向真实 Held-Out/8 板索引产物，可追加触发对应真实产物 CPU 重建完整性回归测试。
+
+### 3.2 启动最终端到端演示与 8 板回放系统（GT-free）
+1. **模型路径配置**（仅 `--runtime-config` YAML）：复制 `configs/fics_local_runtime.example.yaml` 至本地仓库外路径并填写 `qwen2` / `deepseek` / `qwen3` 权重目录及 `qwen3` `overlay_dir`。
+2. **可选服务启动 JSON**（`--config` JSON，命令行参数优先级高于 JSON 字段）：复制 `configs/fics_final_demo.example.json` 并填入本机 `workspace_root`、`runtime_config`、`results_index`。
+3. **启动服务端**（若仅做 8 板只读回放与功能测试，可省略 `--runtime-config`）：
 ```bash
-python scripts/replay_fics_eval.py \
-  --gt-coco <combined_coco.json> \
-  --replay-manifest <replay_identity_manifest.json> \
-  --runs-dir <runs_dir> \
-  --plan <frozen_plan.json> \
-  --output <new_report.json>
+# 方式 A：使用 --config 启动，必要时用 CLI 参数覆盖
+python scripts/fics_final_demo.py --config /path/to/local_demo_startup.json --port 7862
+
+# 方式 B：直接通过命令行参数启动
+python scripts/fics_final_demo.py \
+  --workspace-root /path/to/demo_workspace \
+  --runtime-config /path/to/local_runtime.yaml \
+  --results-index /path/to/results_index.json \
+  --host 127.0.0.1 --port 7862
 ```
-> 注：默认拒绝覆盖任何已存在文件或输入路径；支持通过 `--path-map OLD=NEW` 与 `--image-root DIR` 在离线证据包中重定位图像并执行 `--verify-disk-hashes`。
+- 新图上传推理全过程**严格不读取 Ground Truth**（结果页默认标记“未评价”）。
+- 事后上传可选 COCO GT 时，系统校验类别、像素尺寸及声明 SHA-256（**已知哈希冲突直接拒绝**）；若无 SHA 且文件名不一致（即使单图 COCO 或指定了 `target_image_id`），必须由用户显式勾选人工确认并如实标记 `image_identity_verified=false`。当某类 GT 支持数为 `0` 时，Recall 与 F1 规范输出 `null` / `N/A (GT=0)` 并保留真实 `FP` 计数。
 
-### 3.3 集成推理入口验证（默认 CPU `--dry-run` 与显式 `--execute`）
-`scripts/run_fics_matrix.py` 由已验证的外部 GPU matrix runner 整合迁移进仓库。基于本地提交 `376011b`，该集成入口已通过全仓 163 项 CPU 合同/回归测试、双份 `--dry-run` 核验，并已在 `RTX 4060 Laptop GPU (8 GB)` 上通过显式 `--execute --verify-input-hashes` 完成了三模型各 `1` 次（`qwen2 -> deepseek -> qwen3` 共 `3` 次调用、墙钟 `93.421 s`、退出码 `0`）的受控 **GPU 工程 Smoke 实测**，实证验证了仓库集成后的模型加载、图像处理、首步生成与 `logits` 有限性检查、原始记录落盘与来源 SHA-256 校验链路（独立审查回执见 `C:\Users\Liu\.codex\artifacts\pcb-fics-integration-smoke-review-20261115\independent_smoke_and_git.json` 及 `审查结论.md`）。
+### 3.3 集成推理入口与离线 CPU 回放
+- **集成推理 CLI（默认安全 `--dry-run`）**：`python scripts/run_fics_matrix.py --plan <frozen_plan.json> --runtime-config <local_runtime.yaml> --output-dir <new_dir> [--execute]`
+- **二阶段核验 CLI（默认安全 `--dry-run`）**：`python scripts/run_candidate_verifier.py --manifest <verifier_manifest.json> --output-dir <new_dir> [--execute]`
+- **可复现 CPU 回放评价**：`python scripts/replay_fics_eval.py --gt-coco <combined_coco.json> --replay-manifest <replay_identity_manifest.json> --runs-dir <runs_dir> --plan <frozen_plan.json> --output <new_report.json>`
 
-> **集成测试边界声明**：本次 Smoke 仅验证单个冻结切片（`s18_front` `T00`）的端到端工程通路，**未在仓库集成后重跑完整 507 调用主矩阵（第 1 节 201+306 成绩仍来自已验收的正式回放，Smoke 结果不并入主成绩表）**；其中 `Qwen2` 可解析的 `6` 个框与 `Qwen3` 截断前恢复的 `14` 个框均仅代表结构化提取数量而非 `TP` 命中数，`DeepSeek` 在 `145` token 正常 EOS 后返回英文自然语言描述（`0` 个有效框）属于输出格式契约失败而非未执行。
-
-为防止误触 GPU，CLI 与 Python API 现均**默认运行 CPU `--dry-run`**（仅在显式传入 `--execute` / `dry_run=False` 时才执行 GPU 探针与 worker）；且 `--runtime-config` 仅允许覆盖本地路径与运行环境，严禁修改冻结 `repo_id`、`revision`、`attn_implementation`、`visual_budget` 与队列配置。
-
-1. 复制 [configs/fics_local_runtime.example.yaml](configs/fics_local_runtime.example.yaml) 为本地配置（如 `configs/fics_local_runtime.yaml`）并填入本地权重与 `qwen3` 依赖覆盖路径。
-2. 先执行 CPU 干跑检查计划、重映射图像与输出目录安全性（可省略 `--dry-run`，显式写明更清晰；与 `--execute` 互斥）：
-   ```bash
-   python scripts/run_fics_matrix.py \
-     --plan <frozen_plan.json> \
-     --runtime-config configs/fics_local_runtime.yaml \
-     --output-dir <new_clean_output_dir> \
-     --dry-run --verify-input-hashes
-   ```
-3. 未来如需在 GPU 上执行集成入口实跑复验（必须显式传 `--execute`，且强制执行双门限显存探针 `nvidia-smi >= 5500 MiB` 与 `torch.cuda.mem_get_info >= 6144 MiB`）：
-   ```bash
-   python scripts/run_fics_matrix.py \
-     --plan <single_board_smoke_plan.json> \
-     --runtime-config configs/fics_local_runtime.yaml \
-     --output-dir <new_smoke_output_dir> \
-     --models qwen3 \
-     --execute
-   ```
-
-### 3.4 自动生成汇总表/图表 与 只读真实回放展示页面
-```bash
-# 1) 根据 results_index.json 校验 SHA-256 并重新生成表与图
-python scripts/build_fics_results_bundle.py \
-  --index <results_index.json> \
-  --out-json <results_summary_tables.json> \
-  --out-md docs/fics_results_tables.md \
-  --figures-dir <figures_dir>
-
-# 2) 启动只读历史回放展示服务（支持数据集隔离切换、TP/FP/FN 叠加、局部放大与原文检查）
-python scripts/fics_showcase.py --index <results_index.json> --port 7861
-```
+### 3.4 外部运行依赖说明
+仓库与小型 CPU 证据包均不包含数 GB 级本地预训练权重、`transformers 4.57.6` 覆盖包及 FICS-PCB 原图。真实 GPU 推理需预先在本地准备：`Qwen/Qwen2-VL-2B-Instruct`（本地 `snapshots/master`，`revision=null`）、`deepseek-ai/deepseek-vl-1.3b-chat`（本地 `snapshots/master`，`revision=null`）、`Qwen/Qwen3-VL-2B-Instruct`（commit `89644892e4d85e24eaac8bacfd4f463576704203`），以及 CUDA 12.1 环境（`>= 8 GB` 显存，双门限要求 `nvidia-smi >= 5500 MiB` 与 `torch.cuda.mem_get_info >= 6144 MiB`）。
 
 ---
 
 ## 4. 历史工作归档（WACV 2019 11 类 / QLoRA R6-R7）
 
-以下内容属于早期在 **WACV 2019 11 类 PCB 数据集** 上的基准探索、QLoRA 监督微调（R6 / R7）及对应演示服务，与当前 FICS-PCB 6 类主线完全解耦：
+以下内容属于早期在 **WACV 2019 11 类 PCB 数据集** 上的基准探索、QLoRA 监督微调（R6 / R7）及旧版入口，与当前 FICS-PCB 6 类 8 板研究与最终演示主线完全解耦：
 - 类别与任务旧配置：`configs/classes.yaml`、`configs/task.yaml`、`configs/lora*.yaml`
-- 旧演示服务入口：`scripts/demo_app.py`（仅面向历史 WACV 模型与旧路径，请勿用于当前 FICS-PCB 6 类结果展示）
+- 旧演示服务入口：`scripts/demo_app.py`、`scripts/fics_showcase.py`（分别面向早期 WACV 与 4 板回放）
 - 旧批次评估与训练脚本：`scripts/train_lora.py`、`scripts/infer_batch.py`、`scripts/run_v2_comparison.py`、`scripts/run_v3_lora_comparison.py`、`scripts/train_yolo_v3.py`
