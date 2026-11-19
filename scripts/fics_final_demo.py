@@ -299,7 +299,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <label><input type="checkbox" id="chkResTP" checked /> <span class="badge b-tp">TP</span></label>
             <label><input type="checkbox" id="chkResFP" checked /> <span class="badge b-fp">FP</span></label>
             <label><input type="checkbox" id="chkResFN" checked /> <span class="badge b-fn">FN</span></label>
-            <label><input type="checkbox" id="chkResLabels" /> 全图文本标签</label>
             <label id="lblResPreT" style="display:none;"><input type="checkbox" id="chkResPreT" /> 显示 T 核验前被剔除框</label>
           </div>
         </div>
@@ -929,24 +928,21 @@ function renderResCanvas() {
   const sTP = document.getElementById("chkResTP").checked;
   const sFP = document.getElementById("chkResFP").checked;
   const sFN = document.getElementById("chkResFN").checked;
-  const sLabels = Boolean(RES_CROP) || document.getElementById("chkResLabels").checked;
   const sPre = document.getElementById("chkResPreT").checked;
   const sw = Math.max(2, vw / 420), fs = Math.max(12, Math.round(vw / 75));
   let elems = "";
-  const drawBox = (b, col, dash, txt, showTxt) => {
+  const drawBox = (b, col, dash, txt) => {
     const x1 = b[0] - rox, y1 = b[1] - roy, w = Math.max(2, b[2] - b[0]), h = Math.max(2, b[3] - b[1]);
     elems += `<rect x="${x1}" y="${y1}" width="${w}" height="${h}" fill="none" stroke="${col}" stroke-width="${sw}" ${dash ? 'stroke-dasharray="' + (sw*3) + ' ' + (sw*2) + '"' : ""} />`;
-    if (showTxt) {
-      elems += `<text x="${x1}" y="${Math.max(vy1 + fs, y1 - 4)}" fill="${col}" font-size="${fs}" font-weight="bold" style="paint-order:stroke;stroke:#020617;stroke-width:${Math.max(3,fs/4)}px;">${txt}</text>`;
-    }
+    elems += `<text x="${x1}" y="${Math.max(vy1 + fs, y1 - 4)}" fill="${col}" font-size="${fs}" font-weight="bold" style="paint-order:stroke;stroke:#020617;stroke-width:${Math.max(3,fs/4)}px;">${txt}</text>`;
   };
   if (sPre && r.pre_verifier_candidates) {
-    for (const c of r.pre_verifier_candidates) if (!c.kept) drawBox(c.bbox_xyxy, "#fb7185", true, `Filtered:${c.label}`, sLabels);
+    for (const c of r.pre_verifier_candidates) if (!c.kept) drawBox(c.bbox_xyxy, "#fb7185", true, `Filtered:${c.label}`);
   }
-  for (const g of r.gts) if (g.match_status === "FN" && sFN) drawBox(g.bbox_xyxy, "#facc15", true, `FN:${g.label}`, sLabels);
+  for (const g of r.gts) if (g.match_status === "FN" && sFN) drawBox(g.bbox_xyxy, "#facc15", true, `FN:${g.label}`);
   for (const p of r.predictions) {
-    if (p.match_status === "TP" && sTP) drawBox(p.bbox_xyxy, "#38bdf8", false, `TP:${p.label}`, true);
-    if (p.match_status === "FP" && sFP) drawBox(p.bbox_xyxy, "#ef4444", true, `FP:${p.label}`, sLabels);
+    if (p.match_status === "TP" && sTP) drawBox(p.bbox_xyxy, "#38bdf8", false, `TP:${p.label}`);
+    if (p.match_status === "FP" && sFP) drawBox(p.bbox_xyxy, "#ef4444", true, `FP:${p.label}`);
   }
   svg.innerHTML = elems;
 }
@@ -957,7 +953,7 @@ document.getElementById("resModel").onchange = loadResBoardView;
 document.getElementById("resMode").onchange = loadResBoardView;
 document.getElementById("resZoom").onchange = renderResCanvas;
 document.getElementById("btnResResetCrop").onclick = () => { RES_CROP = null; renderResCanvas(); };
-for (const id of ["chkResTP", "chkResFP", "chkResFN", "chkResLabels", "chkResPreT"]) document.getElementById(id).onchange = renderResCanvas;
+for (const id of ["chkResTP", "chkResFP", "chkResFN", "chkResPreT"]) document.getElementById(id).onchange = renderResCanvas;
 
 async function refreshRecentJobs() {
   try {
