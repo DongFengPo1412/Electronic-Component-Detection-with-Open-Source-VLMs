@@ -51,9 +51,17 @@ if str(_SCRIPTS_ROOT) not in sys.path:
 
 import evaluate as repo_eval  # noqa: E402
 
+import numpy as np  # noqa: E402
+
 MODEL_ORDER: Tuple[str, ...] = ("qwen2", "deepseek", "qwen3")
 SUPPORTED_IMAGE_SUFFIXES: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
 TERMINAL_JOB_STATUSES: Tuple[str, ...] = ("completed", "failed", "cancelled", "incomplete")
+MAX_UPLOAD_BYTES: int = 256 * 1024 * 1024
+MIN_IMAGE_DIM: int = 32
+MAX_IMAGE_DIM: int = 16384
+MAX_IMAGE_PIXELS: int = 100_000_000
+MAX_TILE_COUNT: int = 120
+RECOMMENDED_LIVE_T_B_OTHER_MAX_TILES: int = 24
 FROZEN_DETECTION_PROMPT = (
     "Locate all visible electronic components belonging to these classes: "
     "capacitor, resistor, inductor, transistor, diode, ic. "
@@ -65,14 +73,141 @@ FROZEN_DETECTION_PROMPT = (
 FROZEN_DETECTION_PROMPT_SHA256 = hashlib.sha256(FROZEN_DETECTION_PROMPT.encode("utf-8")).hexdigest()
 MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "qwen2": "Qwen2-VL-2B-Instruct",
-    "deepseek": "deepseek-vl-1.3b-chat",
+    "deepseek": "deepseek-vl-1.3b-chat（v1）",
     "qwen3": "Qwen3-VL-2B-Instruct",
+}
+MODEL_VISUAL_PREPROCESS_NOTES: Dict[str, str] = {
+    "qwen2": "Qwen2-VL 原生动态分辨率预算 (min_pixels=65,536, max_pixels=200,704, SDPA)",
+    "deepseek": "DeepSeek-VL v1 原生固定正方形缩放 (384×384 + [127,127,127] 灰边填充)",
+    "qwen3": "Qwen3-VL 原生动态分辨率预算 (shortest_edge=65,536, longest_edge=200,704, SDPA + 独立依赖覆盖)",
+}
+CLASS_CN_NAMES: Dict[str, str] = {
+    "capacitor": "电容",
+    "resistor": "电阻",
+    "inductor": "电感",
+    "transistor": "晶体管",
+    "diode": "二极管",
+    "ic": "集成电路",
+}
+CLASS_DISPLAY_NAMES: Dict[str, str] = {
+    k: f"{v} ({k})" for k, v in CLASS_CN_NAMES.items()
 }
 MODE_DISPLAY_NAMES: Dict[str, str] = {
     "W": "W（整 ROI 推理）",
     "T": "T（切片推理 + NMS）",
     "T_B_other": "T + B_other（切片+背景核验 · 冻结方法）",
 }
+
+
+def _classify_job_outcome(
+    status: str,
+    *,
+    kept_predictions_count: Optional[int] = None,
+    termination_v2: Optional[Mapping[str, Any]] = None,
+    technical_complete: Optional[bool] = None,
+    error_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Classify a single-model job state into explicit user-facing detection outcomes.
+
+    Strictly distinguishes:
+    - waiting / queued
+    - running
+    - completed_with_boxes (valid target predictions parsed)
+    - completed_zero_boxes (technical run finished with 0 valid boxes; never equated to 'no components on PCB',
+      and distinguishes explicit empty array [] from length-limited or unparseable output)
+    - failed / incomplete (never disguised as empty predictions)
+    - cancelled
+    """
+    st = str(status or "").strip()
+    if st in ("waiting", "queued"):
+        return {
+            "outcome_code": "waiting",
+            "outcome_label": "等待中",
+            "has_valid_boxes": False,
+            "zero_box_reason": None,
+            "outcome_note": "任务在串行队列中等待启动。",
+        }
+    if st in ("running", "running_base_inference", "preparing_verifier", "running_verifier"):
+        return {
+            "outcome_code": "running",
+            "outcome_label": "运行中",
+            "has_valid_boxes": False,
+            "zero_box_reason": None,
+            "outcome_note": "正在独占单 GPU 执行推理。",
+        }
+    if st == "cancelled":
+        return {
+            "outcome_code": "cancelled",
+            "outcome_label": "已取消",
+            "has_valid_boxes": False,
+            "zero_box_reason": None,
+            "outcome_note": error_message or "任务已被用户取消，不生成预测成绩。",
+        }
+    if st in ("failed", "incomplete") or technical_complete is False:
+        return {
+            "outcome_code": "failed",
+            "outcome_label": "运行失败" if st == "failed" else "推理未完整（失败）",
+            "has_valid_boxes": False,
+            "zero_box_reason": None,
+            "outcome_note": error_message or "推理未完整结束或门禁未通过，拒绝伪装为空预测。",
+        }
+    if st == "completed":
+        cnt = int(kept_predictions_count or 0)
+        tv2 = dict(termination_v2 or {})
+        tot = int(tv2.get("total_calls") or 0)
+        exp_empty = int(tv2.get("explicit_empty") or 0)
+        len_lim = int(tv2.get("length_limited_without_eos") or 0)
+        syn_inc = int(tv2.get("syntax_or_format_incomplete_after_eos") or 0)
+        if cnt > 0:
+            note = f"模型预测检出 {cnt} 个目标框（GT-free 未做精度评价，框数不等于板上真实元器件总数）。"
+            if len_lim > 0:
+                note += f" 注意：{len_lim}/{tot} 次调用达 token 上限未闭合（已解析闭合前缀中的合法框）。"
+            return {
+                "outcome_code": "completed_with_boxes",
+                "outcome_label": f"完成（检出 {cnt} 框）",
+                "has_valid_boxes": True,
+                "zero_box_reason": None,
+                "outcome_note": note,
+            }
+        if tot > 0 and exp_empty == tot:
+            reason = "explicit_empty_array"
+            lbl = "无有效框（显式输出 []）"
+            note = (
+                "模型正常结束并显式输出空数组 []。“无有效框”仅表示模型在当前模式下未检出目标，"
+                "不等于电路板上没有元器件。"
+            )
+        elif len_lim > 0:
+            reason = "length_limited_without_eos"
+            lbl = "无有效框（达 token 上限截断）"
+            note = (
+                f"模型推理完成但 {len_lim}/{tot} 次调用达 512 token 上限未正常闭合且未解析出合法目标框；"
+                "此状态属于模型输出不合规/截断导致的零有效框，不伪装为显式空预测 []，也不等于板上无元器件。"
+            )
+        elif syn_inc > 0:
+            reason = "format_non_compliant_zero_valid_boxes"
+            lbl = "无有效框（输出格式不合规）"
+            note = (
+                "模型输出结束但未满足严格 6 类 JSON 坐标契约，解析后有效框为 0；"
+                "不伪装为显式空预测 []，也不等于板上无元器件。"
+            )
+        else:
+            reason = "zero_kept_after_filter"
+            lbl = "无有效框（过滤后 0 框）"
+            note = "推理完成但过滤后保留有效预测框为 0；“无有效框”不等于电路板上没有元器件。"
+        return {
+            "outcome_code": "completed_zero_boxes",
+            "outcome_label": lbl,
+            "has_valid_boxes": False,
+            "zero_box_reason": reason,
+            "outcome_note": note,
+        }
+    return {
+        "outcome_code": st or "unknown",
+        "outcome_label": st or "未知状态",
+        "has_valid_boxes": False,
+        "zero_box_reason": None,
+        "outcome_note": error_message or "",
+    }
 
 
 class DemoError(Exception):
@@ -139,7 +274,14 @@ def _write_json_atomic(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        for attempt in range(6):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
     finally:
         if tmp.exists():
             try:
@@ -405,6 +547,15 @@ class ResearchReplayStore:
             self._load()
 
     @staticmethod
+    def _safe_is_file(path_like: Any) -> bool:
+        if not path_like:
+            return False
+        try:
+            return pathlib.Path(str(path_like)).is_file()
+        except OSError:
+            return False
+
+    @staticmethod
     def _verify_entry(base_dir: pathlib.Path, entry: Mapping[str, Any], ctx: str) -> pathlib.Path:
         raw_p = pathlib.Path(str(entry["path"]))
         p = raw_p if raw_p.is_absolute() else (base_dir / raw_p)
@@ -471,8 +622,8 @@ class ResearchReplayStore:
                     r = json.loads(line)
                     bid = str(r["board_id"])
                     if bid in boards and r.get("mode") == "W" and boards[bid]["roi_image_path"] is None:
-                        cand_p = pathlib.Path(str(r.get("image_path") or ""))
-                        boards[bid]["roi_image_path"] = str(cand_p) if cand_p.is_file() else r.get("image_path")
+                        cand_str = str(r.get("image_path") or "")
+                        boards[bid]["roi_image_path"] = cand_str if self._safe_is_file(cand_str) else r.get("image_path")
                         boards[bid]["roi_sha256"] = r.get("expected_sha256") or r.get("input_sha256")
                         boards[bid]["roi_offset_x"] = int(r.get("roi_offset_x", 0))
                         boards[bid]["roi_offset_y"] = int(r.get("roi_offset_y", 0))
@@ -590,7 +741,7 @@ class ResearchReplayStore:
                         "gt_count": len(b["gts"]),
                         "roi_width": b["roi_width"],
                         "roi_height": b["roi_height"],
-                        "roi_image_available": bool(b["roi_image_path"] and pathlib.Path(b["roi_image_path"]).is_file()),
+                        "roi_image_available": self._safe_is_file(b["roi_image_path"]),
                     }
                     for bid, b in ds["boards"].items()
                 ],
@@ -688,7 +839,7 @@ class ResearchReplayStore:
                     "offset_y": b["roi_offset_y"],
                     "width": b["roi_width"],
                     "height": b["roi_height"],
-                    "image_available": bool(b["roi_image_path"] and pathlib.Path(b["roi_image_path"]).is_file()),
+                    "image_available": self._safe_is_file(b["roi_image_path"]),
                     "sha256": b["roi_sha256"],
                 },
                 "metrics": matched["metrics"],
@@ -723,7 +874,7 @@ class ResearchReplayStore:
                 "offset_y": b["roi_offset_y"],
                 "width": b["roi_width"],
                 "height": b["roi_height"],
-                "image_available": bool(b["roi_image_path"] and pathlib.Path(b["roi_image_path"]).is_file()),
+                "image_available": self._safe_is_file(b["roi_image_path"]),
                 "sha256": b["roi_sha256"],
             },
             "metrics": matched["metrics"],
@@ -750,7 +901,7 @@ class ResearchReplayStore:
             raise DemoError(f"板卡 {board_id!r} 不在 {dataset_key!r}", status_code=404)
         b = ds["boards"][board_id]
         img_str = b.get("roi_image_path")
-        if not img_str or not pathlib.Path(img_str).is_file():
+        if not self._safe_is_file(img_str):
             raise DemoError(f"板卡 ROI 图像不可用：{img_str!r}", status_code=404)
         exp_sha = b.get("roi_sha256")
         if exp_sha and file_sha256(pathlib.Path(img_str)).lower() != str(exp_sha).lower():
@@ -796,8 +947,10 @@ class LiveDemoService:
         self.workspace_root = pathlib.Path(workspace_root).resolve()
         self.uploads_dir = self.workspace_root / "uploads"
         self.jobs_dir = self.workspace_root / "jobs"
+        self.comparisons_dir = self.workspace_root / "comparisons"
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.comparisons_dir.mkdir(parents=True, exist_ok=True)
 
         self.runtime_config_path = pathlib.Path(runtime_config_path).resolve() if runtime_config_path else None
         self.runtime_config: Dict[str, Any] = {}
@@ -818,20 +971,38 @@ class LiveDemoService:
         self._lock = threading.Lock()
         self._job_state_locks_guard = threading.Lock()
         self._job_state_locks: Dict[str, threading.Lock] = {}
+        self._comparison_locks: Dict[str, threading.Lock] = {}
         self._active_job_id: Optional[str] = None
+        self._active_comparison_id: Optional[str] = None
         self._cancel_events: Dict[str, threading.Event] = {}
+        self._comparison_cancel_events: Dict[str, threading.Event] = {}
+        self._cancelled_comparisons: set[str] = set()
         self._active_procs: Dict[str, subprocess.Popen[Any]] = {}
         self._job_threads: Dict[str, threading.Thread] = {}
-        self._preview_cache: Dict[Tuple[str, int, Optional[str]], bytes] = {}
+        self._comparison_threads: Dict[str, threading.Thread] = {}
+        self._preview_cache: Dict[Tuple[str, str, int, Optional[str]], bytes] = {}
 
     def shutdown(self) -> None:
-        """Cancel any active GPU job and terminate its subprocess tree before server exit."""
+        """Cancel any active comparison queue or GPU job and terminate subprocess trees before exit."""
         with self._lock:
+            active_cmp_ids = list(self._comparison_cancel_events.keys())
             active_ids = list(self._cancel_events.keys())
+        for cid in active_cmp_ids:
+            try:
+                self.cancel_comparison(cid)
+            except Exception:
+                pass
         for jid in active_ids:
-            self.cancel_job(jid)
+            try:
+                self.cancel_job(jid)
+            except Exception:
+                pass
         with self._lock:
+            cmp_threads = list(self._comparison_threads.values())
             threads = list(self._job_threads.values())
+        for th in cmp_threads:
+            if th.is_alive():
+                th.join(timeout=8.0)
         for th in threads:
             if th.is_alive():
                 th.join(timeout=8.0)
@@ -852,10 +1023,30 @@ class LiveDemoService:
             raise DemoError(f"任务不存在：{job_id!r}", status_code=404)
         return d
 
+    def _comparison_dir(self, comparison_id: str) -> pathlib.Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", str(comparison_id or "")):
+            raise DemoError(f"无效 comparison_id：{comparison_id!r}", status_code=400)
+        d = (self.comparisons_dir / comparison_id).resolve()
+        if d.parent != self.comparisons_dir or not d.is_dir():
+            raise DemoError(f"同图对比记录不存在：{comparison_id!r}", status_code=404)
+        return d
+
     def register_upload(self, *, raw_bytes: bytes, raw_filename: str) -> Dict[str, Any]:
         """Validate uploaded board image, compute GT-free ROI/tiling pre-flight, and persist inputs."""
         if not raw_bytes:
             raise DemoError("上传文件内容为空，请选择有效的 PCB 图像文件。", status_code=400)
+        if len(raw_bytes) > MAX_UPLOAD_BYTES:
+            raise DemoError(
+                f"上传文件超出大小限制（当前 {len(raw_bytes)} 字节，最大允许 {MAX_UPLOAD_BYTES} 字节 / 256 MiB）。",
+                status_code=413,
+            )
+
+        raw_suffix = pathlib.Path(str(raw_filename or "").strip()).suffix.lower()
+        if raw_suffix and raw_suffix not in SUPPORTED_IMAGE_SUFFIXES:
+            raise DemoError(
+                f"不支持的图像文件扩展名 {raw_suffix!r}；请上传单帧 PNG、JPG/JPEG、TIF/TIFF、BMP 或 WEBP 图像。",
+                status_code=400,
+            )
 
         safe_name = _safe_filename(raw_filename)
         upload_id = f"up_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -866,11 +1057,26 @@ class LiveDemoService:
 
         try:
             with Image.open(src_path) as im:
+                n_frames = int(getattr(im, "n_frames", 1) or 1)
+                if n_frames > 1:
+                    raise ValueError(f"检测到多帧或多页图像 (n_frames={n_frames})，仅支持单帧 PCB 图像")
                 im_rgb = ImageOps.exif_transpose(im).convert("RGB")
-                _ = im_rgb.size
+                orig_w, orig_h = im_rgb.size
+                if orig_w < MIN_IMAGE_DIM or orig_h < MIN_IMAGE_DIM:
+                    raise ValueError(f"图像尺寸过小 ({orig_w}x{orig_h})，低于最小检测要求 {MIN_IMAGE_DIM}x{MIN_IMAGE_DIM}")
+                if orig_w > MAX_IMAGE_DIM or orig_h > MAX_IMAGE_DIM or (orig_w * orig_h) > MAX_IMAGE_PIXELS:
+                    raise ValueError(
+                        f"图像分辨率超限 ({orig_w}x{orig_h}={orig_w * orig_h:,} 像素)，"
+                        f"超出单机安全预检上限 (最大边长 {MAX_IMAGE_DIM}，最大总像素 {MAX_IMAGE_PIXELS:,})"
+                    )
+                arr_check = np.asarray(im_rgb)
+                non_white_pixels = int(np.count_nonzero(np.any(arr_check < 248, axis=2)))
+                pixel_std = float(arr_check.std())
+                if non_white_pixels < 64 or pixel_std < 1.0:
+                    raise ValueError("图像内容全空、全白或为纯色背景，未检测到有效 PCB 板卡前景区域")
         except Exception as exc:
             shutil.rmtree(udir, ignore_errors=True)
-            raise DemoError(f"无法将文件解析为有效图像：{exc}", status_code=400) from exc
+            raise DemoError(f"图像预检未通过（无法解析或不适合检测）：{exc}", status_code=400) from exc
 
         board_key = pathlib.Path(safe_name).stem or upload_id
         inputs_dir = udir / "inputs"
@@ -883,6 +1089,13 @@ class LiveDemoService:
             export_dir=inputs_dir,
             board_key=board_key,
         )
+        if int(geom["tile_count"]) <= 0 or int(geom["tile_count"]) > MAX_TILE_COUNT:
+            shutil.rmtree(udir, ignore_errors=True)
+            raise DemoError(
+                f"ROI 切片数量超限（tile_count={geom['tile_count']}，单机上限 {MAX_TILE_COUNT}），拒绝启动超界推理。",
+                status_code=400,
+            )
+
         img_sha = file_sha256(src_path)
         meta = {
             "schema_version": "fics_upload_preflight_v1",
@@ -909,40 +1122,134 @@ class LiveDemoService:
 
     @staticmethod
     def _public_upload_summary(meta: Mapping[str, Any]) -> Dict[str, Any]:
+        tc = int(meta["tile_count"])
+        within_live_t_budget = tc <= RECOMMENDED_LIVE_T_B_OTHER_MAX_TILES
         return {
             "upload_id": meta["upload_id"],
             "safe_filename": meta["safe_filename"],
             "board_id": meta["board_id"],
             "source_image_sha256": meta["source_image_sha256"],
+            "bytes": meta.get("bytes"),
             "orig_wh": meta["orig_wh"],
             "roi_bbox_half_open": meta["roi_bbox_half_open"],
             "roi_offset_x": meta["roi_offset_x"],
             "roi_offset_y": meta["roi_offset_y"],
             "roi_width": meta["roi_width"],
             "roi_height": meta["roi_height"],
-            "tile_count": meta["tile_count"],
+            "tile_count": tc,
+            "roi_sha256": (meta.get("roi_export") or {}).get("sha256"),
             "gt_required": False,
+            "read_only_playback_only": bool(meta.get("read_only_playback_only")),
+            "playback_preview_notice": meta.get("playback_preview_notice"),
+            "recommended_live_t_b_other_max_tiles": RECOMMENDED_LIVE_T_B_OTHER_MAX_TILES,
+            "within_recommended_live_t_b_other_budget": within_live_t_budget,
+            "available_modes": [
+                {
+                    "mode": "W",
+                    "display_name": MODE_DISPLAY_NAMES["W"],
+                    "supported_models": list(MODEL_ORDER),
+                    "planned_base_calls_per_model": 1,
+                    "is_default_comparison_mode": True,
+                    "workload_note": "每模型 1 次整图 ROI 调用（三模型串行对比共 3 次调用，各模型使用各自冻结原生视觉预处理）",
+                },
+                {
+                    "mode": "T",
+                    "display_name": MODE_DISPLAY_NAMES["T"],
+                    "supported_models": list(MODEL_ORDER),
+                    "planned_base_calls_per_model": tc,
+                    "is_default_comparison_mode": False,
+                    "workload_note": f"每模型 {tc} 次 1024×1024 切片调用 + 0.50 IoU NMS 去重",
+                },
+                {
+                    "mode": "T_B_other",
+                    "display_name": MODE_DISPLAY_NAMES["T_B_other"],
+                    "supported_models": ["qwen3"],
+                    "planned_base_calls_per_model": tc,
+                    "is_default_comparison_mode": False,
+                    "within_recommended_live_budget": within_live_t_budget,
+                    "workload_note": (
+                        f"仅限 Qwen3 单独冻结增强：{tc} 次切片调用 + 候选框 10% 外扩裁剪二次核验 "
+                        f"({'符合 <=24 切片现场推荐预算' if within_live_t_budget else f'当前 {tc} 切片超出 <=24 现场快速预算，建议优先使用 W 同图对比'})"
+                    ),
+                },
+            ],
         }
 
-    def render_upload_roi_jpeg(self, *, upload_id: str, max_width: int = 1600, crop: Optional[str] = None) -> bytes:
+    def get_upload_summary(self, upload_id: str) -> Dict[str, Any]:
         udir = self._upload_dir(upload_id)
         meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
-        roi_p = pathlib.Path(meta["roi_export"]["path"])
-        if not roi_p.is_file():
-            raise DemoError("ROI 图像文件缺失。", status_code=404)
-        key = (upload_id, int(max_width), crop)
+        return self._public_upload_summary(meta)
+
+    def _resolve_upload_image_path(self, udir: pathlib.Path, meta: Mapping[str, Any], src_kind: str) -> Tuple[pathlib.Path, bool]:
+        """Resolve upload image path portably across moved/isolated workspaces.
+
+        Returns (resolved_path, is_derived_preview_only).
+        """
+        if src_kind == "orig":
+            raw_p = str(meta.get("source_image_path") or "").strip()
+            candidates: List[pathlib.Path] = []
+            if raw_p:
+                p = pathlib.Path(raw_p)
+                candidates.append(p if p.is_absolute() else (udir / p))
+            if meta.get("safe_filename"):
+                candidates.append(udir / str(meta["safe_filename"]))
+            for cand in candidates:
+                if cand.is_file():
+                    return cand.resolve(), False
+            raise DemoError(
+                "外置全分辨率原图未随当前轻量交付包附带，无法显示完整原图视图；"
+                "请切换为「ROI 裁切视图」（只读预览）或按外置路径说明挂载原图。",
+                status_code=404,
+            )
+
+        roi_meta = meta.get("roi_export") or {}
+        raw_roi = str(roi_meta.get("path") or "").strip()
+        roi_candidates: List[pathlib.Path] = []
+        if raw_roi:
+            p = pathlib.Path(raw_roi)
+            roi_candidates.append(p if p.is_absolute() else (udir / p))
+            roi_candidates.append(udir / "inputs" / p.name)
+        for cand in roi_candidates:
+            if cand.is_file():
+                return cand.resolve(), False
+
+        raw_prev = str(roi_meta.get("playback_preview_path") or "").strip()
+        if raw_prev:
+            pp = pathlib.Path(raw_prev)
+            pp = pp if pp.is_absolute() else (udir / pp)
+            if pp.is_file():
+                return pp.resolve(), True
+        raise DemoError("ROI 预览图像文件缺失。", status_code=404)
+
+    def render_upload_roi_jpeg(
+        self,
+        *,
+        upload_id: str,
+        max_width: int = 1600,
+        crop: Optional[str] = None,
+        source: str = "roi",
+    ) -> bytes:
+        udir = self._upload_dir(upload_id)
+        meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
+        src_kind = "orig" if str(source or "roi").strip().lower() == "orig" else "roi"
+        img_p, is_preview = self._resolve_upload_image_path(udir, meta, src_kind)
+        key = (upload_id, src_kind, int(max_width), crop)
         if key in self._preview_cache:
             return self._preview_cache[key]
-        with Image.open(roi_p) as im:
-            rgb = im.convert("RGB")
+        with Image.open(img_p) as im:
+            rgb = ImageOps.exif_transpose(im).convert("RGB") if src_kind == "orig" else im.convert("RGB")
             if crop:
-                parts = [int(float(v)) for v in crop.split(",")]
+                parts = [float(v) for v in crop.split(",")]
                 if len(parts) != 4:
                     raise DemoError(f"无效局部裁剪参数：{crop!r}", status_code=400)
-                x1 = max(0, min(rgb.width - 1, parts[0]))
-                y1 = max(0, min(rgb.height - 1, parts[1]))
-                x2 = max(x1 + 1, min(rgb.width, parts[2]))
-                y2 = max(y1 + 1, min(rgb.height, parts[3]))
+                if is_preview and int(meta.get("roi_width") or 0) > 0 and int(meta.get("roi_height") or 0) > 0:
+                    sx = rgb.width / float(meta["roi_width"])
+                    sy = rgb.height / float(meta["roi_height"])
+                    parts = [parts[0] * sx, parts[1] * sy, parts[2] * sx, parts[3] * sy]
+                x1 = max(0, min(rgb.width - 1, int(round(parts[0]))))
+                y1 = max(0, min(rgb.height - 1, int(round(parts[1]))))
+                x2 = max(x1 + 1, min(rgb.width, int(round(parts[2]))))
+                y2 = max(y1 + 1, min(rgb.height, int(round(parts[3]))))
                 rgb = rgb.crop((x1, y1, x2, y2))
             if max_width > 0 and rgb.width > max_width:
                 new_h = max(1, int(round(rgb.height * (max_width / rgb.width))))
@@ -1084,11 +1391,24 @@ class LiveDemoService:
             "queues": {model_key: queue_items},
         }
 
-    def submit_job(self, *, upload_id: str, model_key: str, mode: str) -> Dict[str, Any]:
+    def submit_job(
+        self,
+        *,
+        upload_id: str,
+        model_key: str,
+        mode: str,
+        _from_comparison_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Acquire single-GPU-job lock, persist GT-free plan, and launch background execution."""
         mk, norm_mode = validate_model_and_mode(model_key, mode)
         udir = self._upload_dir(upload_id)
         meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
+        if meta.get("read_only_playback_only"):
+            raise DemoError(
+                "当前上传记录为轻量离线交付包内置的只读回放示例（派生预览图仅供展示，不可作为原图重推）；"
+                "如需真实推理，请上传本地新图或按文档挂载外置原图与模型权重。",
+                status_code=400,
+            )
 
         with self._lock:
             if self._active_job_id is not None:
@@ -1096,6 +1416,19 @@ class LiveDemoService:
                     f"已有 GPU 任务正在运行 ({self._active_job_id})，请等待其完成或点击取消后再发起新任务。",
                     active_job_id=self._active_job_id,
                 )
+            if self._active_comparison_id is not None and _from_comparison_id != self._active_comparison_id:
+                raise BusyGpuJobError(
+                    f"已有同图多模型对比队列正在运行 ({self._active_comparison_id})，请等待队列完成或点击取消后再发起新任务。",
+                    active_job_id=self._active_comparison_id,
+                )
+            if _from_comparison_id is not None:
+                cmp_ev = self._comparison_cancel_events.get(_from_comparison_id)
+                if (
+                    _from_comparison_id in self._cancelled_comparisons
+                    or cmp_ev is None
+                    or cmp_ev.is_set()
+                ):
+                    raise InterruptedError("同图对比队列已接受取消，拒绝启动后续未派发模型。")
             job_id = f"job_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             jdir = self.jobs_dir / job_id
             jdir.mkdir(parents=True, exist_ok=True)
@@ -1106,6 +1439,7 @@ class LiveDemoService:
             expected_base_calls = len(plan["queues"][mk])
             job_spec = {
                 "job_id": job_id,
+                "comparison_id": _from_comparison_id,
                 "upload_id": upload_id,
                 "board_id": meta["board_id"],
                 "safe_filename": meta["safe_filename"],
@@ -1120,6 +1454,7 @@ class LiveDemoService:
                 "tile_count": meta["tile_count"],
                 "model_key": mk,
                 "model_display_name": MODEL_DISPLAY_NAMES[mk],
+                "visual_preprocess_note": MODEL_VISUAL_PREPROCESS_NOTES[mk],
                 "mode": norm_mode,
                 "mode_display_name": MODE_DISPLAY_NAMES[norm_mode],
                 "base_mode": base_mode,
@@ -1545,18 +1880,27 @@ class LiveDemoService:
         verifier_summary: Optional[Mapping[str, Any]],
         calls_detail: Mapping[str, Any],
     ) -> Dict[str, Any]:
+        outcome = _classify_job_outcome(
+            "completed",
+            kept_predictions_count=len(kept_predictions),
+            termination_v2=calls_detail["termination_v2"],
+            technical_complete=True,
+        )
         return {
             "schema_version": "fics_demo_job_result_v1",
             "job_id": job_spec["job_id"],
+            "comparison_id": job_spec.get("comparison_id"),
             "upload_id": job_spec["upload_id"],
             "board_id": job_spec["board_id"],
             "safe_filename": job_spec["safe_filename"],
             "source_image_sha256": job_spec["source_image_sha256"],
             "model_key": job_spec["model_key"],
             "model_display_name": job_spec["model_display_name"],
+            "visual_preprocess_note": job_spec.get("visual_preprocess_note") or MODEL_VISUAL_PREPROCESS_NOTES.get(job_spec["model_key"], ""),
             "mode": job_spec["mode"],
             "mode_display_name": job_spec["mode_display_name"],
             "score_semantics_note": "score=1.0 仅为离散坐标标签输出的固定占位值，不代表模型概率置信度。",
+            "gt_evaluation_note": "模型预测 / 未做精度评价（GT-free）：未提供人工真值时不输出准确率/召回率/F1，预测框数量不等于板上真实元器件数量。",
             "gt_loaded": False,
             "post_hoc_eval": None,
             "orig_wh": job_spec["orig_wh"],
@@ -1569,10 +1913,12 @@ class LiveDemoService:
                 "image_path": job_spec["roi_image_path"],
             },
             "technical_complete": True,
+            "outcome": outcome,
             "raw_global_predictions": recon.get("raw_global_predictions", len(kept_predictions)),
             "post_nms_candidates_count": recon.get("post_nms_predictions", len(kept_predictions)),
             "kept_predictions_count": len(kept_predictions),
             "class_counts": _count_classes(kept_predictions),
+            "class_cn_names": dict(CLASS_CN_NAMES),
             "pre_verifier_class_counts": _count_classes(pre_verifier_candidates) if pre_verifier_candidates is not None else None,
             "predictions": list(kept_predictions),
             "pre_verifier_candidates": list(pre_verifier_candidates) if pre_verifier_candidates is not None else None,
@@ -1592,13 +1938,13 @@ class LiveDemoService:
             ev = self._cancel_events.get(job_id)
             proc = self._active_procs.get(job_id)
         if ev is not None:
-            ev.set()
             self._update_state(job_id, cancel_requested=True, stage_label="正在安全终止推理子进程...")
+            ev.set()
         if proc is not None:
             terminate_process_tree(proc)
         return self.get_job_status(job_id)
 
-    def list_jobs(self, limit: int = 30) -> List[Dict[str, Any]]:
+    def list_jobs(self, limit: int = 30, upload_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List persisted jobs newest-first without failing on partial directories."""
         items: List[Dict[str, Any]] = []
         if not self.jobs_dir.is_dir():
@@ -1607,7 +1953,10 @@ class LiveDemoService:
             if not d.is_dir() or not (d / "job_state.json").is_file():
                 continue
             try:
-                items.append(self.get_job_status(d.name))
+                st = self.get_job_status(d.name)
+                if upload_id and st.get("upload_id") != upload_id:
+                    continue
+                items.append(st)
             except Exception:
                 continue
             if len(items) >= int(limit):
@@ -1616,8 +1965,9 @@ class LiveDemoService:
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         jdir = self._job_dir(job_id)
-        spec = json.loads((jdir / "job_spec.json").read_text(encoding="utf-8"))
-        state = json.loads((jdir / "job_state.json").read_text(encoding="utf-8"))
+        with self._get_state_lock(job_id):
+            spec = json.loads((jdir / "job_spec.json").read_text(encoding="utf-8"))
+            state = json.loads((jdir / "job_state.json").read_text(encoding="utf-8"))
         mk = spec["model_key"]
 
         # Read real progress from jsonl files while active
@@ -1645,17 +1995,44 @@ class LiveDemoService:
 
         gate_p = jdir / "base_runs" / f"run_{mk}" / "gpu_gate.json"
         gate_info = json.loads(gate_p.read_text(encoding="utf-8")) if gate_p.is_file() else None
+        res_p = jdir / "job_result.json"
+        has_result = res_p.is_file()
+        kept_cnt: Optional[int] = None
+        tv2: Optional[Dict[str, Any]] = None
+        cls_counts: Optional[Dict[str, int]] = None
+        if has_result:
+            try:
+                res_obj = json.loads(res_p.read_text(encoding="utf-8"))
+                kept_cnt = int(res_obj.get("kept_predictions_count", 0))
+                tv2 = res_obj.get("termination_v2")
+                cls_counts = res_obj.get("class_counts")
+            except Exception:
+                pass
+        outcome = _classify_job_outcome(
+            state["status"],
+            kept_predictions_count=kept_cnt,
+            termination_v2=tv2,
+            technical_complete=state.get("technical_complete"),
+            error_message=state.get("error_message"),
+        )
 
         return {
             "job_id": job_id,
+            "comparison_id": spec.get("comparison_id"),
             "upload_id": spec["upload_id"],
             "board_id": spec["board_id"],
+            "safe_filename": spec.get("safe_filename"),
+            "source_image_sha256": spec.get("source_image_sha256"),
             "model_key": mk,
             "model_display_name": spec["model_display_name"],
+            "visual_preprocess_note": spec.get("visual_preprocess_note") or MODEL_VISUAL_PREPROCESS_NOTES.get(mk, ""),
             "mode": spec["mode"],
             "mode_display_name": spec["mode_display_name"],
             "status": state["status"],
             "stage_label": state["stage_label"],
+            "outcome": outcome,
+            "kept_predictions_count": kept_cnt,
+            "class_counts": cls_counts,
             "cancel_requested": bool(state.get("cancel_requested")),
             "technical_complete": state.get("technical_complete"),
             "error_message": state.get("error_message"),
@@ -1666,7 +2043,7 @@ class LiveDemoService:
             "verifier_calls_planned": ver_plan,
             "verifier_calls_completed": ver_done,
             "gpu_gate": gate_info,
-            "has_result": (jdir / "job_result.json").is_file(),
+            "has_result": has_result,
         }
 
     def get_job_result(self, job_id: str) -> Dict[str, Any]:
@@ -1872,8 +2249,14 @@ class LiveDemoService:
             return data, "application/json; charset=utf-8", f"{job_id}_detections.json"
         if k == "overlay_png":
             roi_p = pathlib.Path(res["roi"]["image_path"])
+            is_preview = False
             if not roi_p.is_file():
-                raise DemoError("ROI 图像不存在，无法导出可视化图片。", status_code=404)
+                try:
+                    udir = self._upload_dir(res["upload_id"])
+                    meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
+                    roi_p, is_preview = self._resolve_upload_image_path(udir, meta, "roi")
+                except Exception:
+                    raise DemoError("ROI 图像不存在，无法导出可视化图片。", status_code=404)
             use_pre = (view == "pre_verifier") and (res.get("pre_verifier_candidates") is not None)
             if use_pre:
                 preds = res["pre_verifier_candidates"]
@@ -1884,16 +2267,54 @@ class LiveDemoService:
             else:
                 preds = res["predictions"]
                 rejected = [c for c in (res.get("pre_verifier_candidates") or []) if not c.get("kept")]
-            png_bytes = render_roi_overlay_png(
-                roi_image_path=roi_p,
-                roi_offset_x=int(res["roi"]["offset_x"]),
-                roi_offset_y=int(res["roi"]["offset_y"]),
-                predictions=preds,
-                rejected_candidates=rejected,
-                show_rejected=(view == "with_rejected"),
-            )
+            if is_preview:
+                with Image.open(roi_p) as prev_im:
+                    pw, ph = prev_im.size
+                sx = pw / float(res["roi"]["width"])
+                sy = ph / float(res["roi"]["height"])
+                rox, roy = int(res["roi"]["offset_x"]), int(res["roi"]["offset_y"])
+
+                def _scale_items(items: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+                    out_items: List[Dict[str, Any]] = []
+                    for it in items:
+                        box = it.get("bbox_xyxy") or it.get("orig_pred_bbox_xyxy")
+                        if not box or len(box) != 4:
+                            continue
+                        cp = dict(it)
+                        cp["bbox_xyxy"] = [
+                            (float(box[0]) - rox) * sx,
+                            (float(box[1]) - roy) * sy,
+                            (float(box[2]) - rox) * sx,
+                            (float(box[3]) - roy) * sy,
+                        ]
+                        out_items.append(cp)
+                    return out_items
+
+                png_bytes = render_roi_overlay_png(
+                    roi_image_path=roi_p,
+                    roi_offset_x=0,
+                    roi_offset_y=0,
+                    predictions=_scale_items(preds),
+                    rejected_candidates=_scale_items(rejected),
+                    show_rejected=(view == "with_rejected"),
+                )
+            else:
+                png_bytes = render_roi_overlay_png(
+                    roi_image_path=roi_p,
+                    roi_offset_x=int(res["roi"]["offset_x"]),
+                    roi_offset_y=int(res["roi"]["offset_y"]),
+                    predictions=preds,
+                    rejected_candidates=rejected,
+                    show_rejected=(view == "with_rejected"),
+                )
             return png_bytes, "image/png", f"{job_id}_{view}_overlay.png"
         if k in ("summary_md", "summary"):
+            out_info = res.get("outcome") or _classify_job_outcome(
+                "completed",
+                kept_predictions_count=res.get("kept_predictions_count"),
+                termination_v2=res.get("termination_v2"),
+                technical_complete=res.get("technical_complete"),
+            )
             lines = [
                 f"# FICS-PCB 整板检测结果摘要 ({job_id})",
                 "",
@@ -1901,14 +2322,17 @@ class LiveDemoService:
                 f"- 原图 SHA-256：`{res['source_image_sha256']}`",
                 f"- 原图尺寸：`{res['orig_wh'][0]}x{res['orig_wh'][1]}` | ROI 偏移：`({res['roi']['offset_x']}, {res['roi']['offset_y']})` | ROI 尺寸：`{res['roi']['width']}x{res['roi']['height']}` | 切片数：`{res['roi']['tile_count']}`",
                 f"- 模型：`{res['model_display_name']}` (`{res['model_key']}`)",
+                f"- 原生视觉预处理：`{res.get('visual_preprocess_note') or MODEL_VISUAL_PREPROCESS_NOTES.get(res['model_key'], '')}`",
                 f"- 模式：`{res['mode_display_name']}` (`{res['mode']}`)",
                 f"- 技术完整性：`{res['technical_complete']}`",
-                f"- 保留预测总数：**{res['kept_predictions_count']}**",
+                f"- 检测结果状态：**{out_info['outcome_label']}** — {out_info['outcome_note']}",
+                f"- 保留预测总数：**{res['kept_predictions_count']}**（仅代表模型预测框数，不等于电路板真实元器件总数）",
                 "",
                 "## 各类别检出计数（6 类）",
             ]
             for cls in FICS_SIX_CLASSES:
-                lines.append(f"- `{cls}`: {res['class_counts'].get(cls, 0)}")
+                cn = CLASS_CN_NAMES.get(cls, cls)
+                lines.append(f"- {cn} (`{cls}`): {res['class_counts'].get(cls, 0)}")
             if res.get("verifier_summary"):
                 vs = res["verifier_summary"]
                 lines.extend([
@@ -1942,7 +2366,608 @@ class LiveDemoService:
                         f"TP={c.get('tp', 0)}, FP={c.get('fp', 0)}, FN={c.get('fn', 0)}, R={cr}"
                     )
             else:
-                lines.append("- **未评价**（本次运行未载入 Ground Truth；全程严格遵循 GT-free 流程）")
+                lines.append(
+                    "- **未评价（模型预测 / 未做精度评价）**：本次运行未载入 Ground Truth；全程严格遵循 GT-free 流程，"
+                    "不计算准确率/召回率/F1，且 `score=1.0` 仅为离散坐标输出占位符，不代表 100% 置信度。"
+                )
             text = ("\n".join(lines) + "\n").encode("utf-8")
             return text, "text/markdown; charset=utf-8", f"{job_id}_summary.md"
         raise DemoError(f"不支持的导出格式：{kind!r}", status_code=400)
+
+    def _get_comparison_lock(self, comparison_id: str) -> threading.Lock:
+        with self._job_state_locks_guard:
+            lk = self._comparison_locks.get(comparison_id)
+            if lk is None:
+                lk = threading.Lock()
+                self._comparison_locks[comparison_id] = lk
+            return lk
+
+    def _update_comparison(self, comparison_id: str, updater: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        cdir = self.comparisons_dir / comparison_id
+        cp = cdir / "comparison.json"
+        with self._get_comparison_lock(comparison_id):
+            data = json.loads(cp.read_text(encoding="utf-8"))
+            updater(data)
+            _write_json_atomic(cp, data)
+            return data
+
+    def submit_comparison(
+        self,
+        *,
+        upload_id: str,
+        model_keys: Sequence[str],
+        mode: str = "W",
+        include_qwen3_b_other: bool = False,
+    ) -> Dict[str, Any]:
+        """Submit a same-image multi-model serial comparison queue sharing upload_id, SHA-256, and mode."""
+        udir = self._upload_dir(upload_id)
+        meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
+        if meta.get("read_only_playback_only"):
+            raise DemoError(
+                "当前上传记录为轻量离线交付包内置的只读回放示例（派生预览图仅供展示，不可作为原图重推）；"
+                "如需真实推理，请上传本地新图或按文档挂载外置原图与模型权重。",
+                status_code=400,
+            )
+        norm_mode = normalize_mode(mode)
+
+        cleaned_models: List[str] = []
+        for raw_mk in model_keys or []:
+            mk = str(raw_mk or "").strip().lower()
+            if mk not in MODEL_ORDER:
+                raise DemoError(f"不支持的对比模型：{raw_mk!r}；仅支持 qwen2、deepseek、qwen3。", status_code=400)
+            if mk not in cleaned_models:
+                cleaned_models.append(mk)
+        if not cleaned_models:
+            raise DemoError("请至少选择一个模型执行检测或同图对比。", status_code=400)
+        if norm_mode == "T_B_other" and any(mk != "qwen3" for mk in cleaned_models):
+            raise DemoError(
+                "冻结方法 T + B_other 仅适用于 Qwen3-VL-2B-Instruct，不可作为多模型同配置对比基线；"
+                "多模型同图对比请选择 W 或 T（可将 Qwen3 T+B_other 作为单独增强项开启）。",
+                status_code=400,
+            )
+
+        slots: List[Dict[str, Any]] = []
+        for idx, mk in enumerate(cleaned_models):
+            slots.append({
+                "slot_index": idx,
+                "slot_id": f"{mk}_{norm_mode}",
+                "slot_role": "baseline_comparison" if norm_mode in ("W", "T") else "separate_qwen3_enhancement",
+                "model_key": mk,
+                "model_display_name": MODEL_DISPLAY_NAMES[mk],
+                "visual_preprocess_note": MODEL_VISUAL_PREPROCESS_NOTES[mk],
+                "mode": norm_mode,
+                "mode_display_name": MODE_DISPLAY_NAMES[norm_mode],
+                "queue_status": "waiting",
+                "job_id": None,
+                "error_message": None,
+            })
+
+        if include_qwen3_b_other and norm_mode != "T_B_other":
+            slots.append({
+                "slot_index": len(slots),
+                "slot_id": "qwen3_T_B_other",
+                "slot_role": "separate_qwen3_enhancement",
+                "model_key": "qwen3",
+                "model_display_name": MODEL_DISPLAY_NAMES["qwen3"],
+                "visual_preprocess_note": MODEL_VISUAL_PREPROCESS_NOTES["qwen3"],
+                "mode": "T_B_other",
+                "mode_display_name": MODE_DISPLAY_NAMES["T_B_other"],
+                "queue_status": "waiting",
+                "job_id": None,
+                "error_message": None,
+            })
+
+        with self._lock:
+            if self._active_job_id is not None or self._active_comparison_id is not None:
+                busy_id = str(self._active_job_id or self._active_comparison_id)
+                raise BusyGpuJobError(
+                    f"已有 GPU 任务或对比队列正在运行 ({busy_id})，请等待其完成或点击取消后再发起新对比。",
+                    active_job_id=busy_id,
+                )
+            comparison_id = f"cmp_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            cdir = self.comparisons_dir / comparison_id
+            cdir.mkdir(parents=True, exist_ok=True)
+            cmp_doc = {
+                "schema_version": "fics_demo_comparison_v1",
+                "comparison_id": comparison_id,
+                "upload_id": upload_id,
+                "board_id": meta["board_id"],
+                "safe_filename": meta["safe_filename"],
+                "source_image_sha256": meta["source_image_sha256"],
+                "orig_wh": meta["orig_wh"],
+                "roi": {
+                    "bbox_half_open": meta["roi_bbox_half_open"],
+                    "offset_x": meta["roi_offset_x"],
+                    "offset_y": meta["roi_offset_y"],
+                    "width": meta["roi_width"],
+                    "height": meta["roi_height"],
+                    "tile_count": meta["tile_count"],
+                    "sha256": (meta.get("roi_export") or {}).get("sha256"),
+                },
+                "baseline_mode": norm_mode,
+                "baseline_mode_display_name": MODE_DISPLAY_NAMES[norm_mode],
+                "model_keys": cleaned_models,
+                "include_qwen3_b_other": bool(include_qwen3_b_other and norm_mode != "T_B_other"),
+                "status": "running",
+                "cancel_requested": False,
+                "created_at": _now_iso(),
+                "started_at_epoch": time.time(),
+                "finished_at_epoch": None,
+                "slots": slots,
+            }
+            _write_json_atomic(cdir / "comparison.json", cmp_doc)
+            cancel_ev = threading.Event()
+            self._comparison_cancel_events[comparison_id] = cancel_ev
+            self._active_comparison_id = comparison_id
+
+            th = threading.Thread(target=self._run_comparison_thread, args=(comparison_id, cancel_ev), daemon=True)
+            self._comparison_threads[comparison_id] = th
+            th.start()
+            return self.get_comparison_status(comparison_id)
+
+    def _run_comparison_thread(self, comparison_id: str, cancel_ev: threading.Event) -> None:
+        cdir = self.comparisons_dir / comparison_id
+        cmp_doc = json.loads((cdir / "comparison.json").read_text(encoding="utf-8"))
+        upload_id = str(cmp_doc["upload_id"])
+        num_slots = len(cmp_doc["slots"])
+
+        try:
+            for idx in range(num_slots):
+                if cancel_ev.is_set():
+                    def _mark_cancelled(d: Dict[str, Any], i: int = idx) -> None:
+                        if d["slots"][i]["queue_status"] == "waiting":
+                            d["slots"][i]["queue_status"] = "cancelled"
+                            d["slots"][i]["error_message"] = "同图对比队列已取消，该模型未启动。"
+                    self._update_comparison(comparison_id, _mark_cancelled)
+                    continue
+
+                slot = json.loads((cdir / "comparison.json").read_text(encoding="utf-8"))["slots"][idx]
+                try:
+                    st = self.submit_job(
+                        upload_id=upload_id,
+                        model_key=slot["model_key"],
+                        mode=slot["mode"],
+                        _from_comparison_id=comparison_id,
+                    )
+                    jid = st["job_id"]
+
+                    def _mark_started(d: Dict[str, Any], i: int = idx, job_id_val: str = jid) -> None:
+                        d["slots"][i]["job_id"] = job_id_val
+                        d["slots"][i]["queue_status"] = "running"
+                    self._update_comparison(comparison_id, _mark_started)
+
+                    j_th = self._job_threads.get(jid)
+                    while j_th is not None and j_th.is_alive():
+                        if cancel_ev.is_set():
+                            self.cancel_job(jid)
+                        j_th.join(timeout=0.1)
+
+                    end_st = self.get_job_status(jid)
+
+                    def _mark_done(d: Dict[str, Any], i: int = idx, est: Dict[str, Any] = end_st) -> None:
+                        d["slots"][i]["queue_status"] = est["status"]
+                        d["slots"][i]["error_message"] = est.get("error_message")
+                    self._update_comparison(comparison_id, _mark_done)
+                except InterruptedError:
+                    def _mark_cancelled_atomic(d: Dict[str, Any], i: int = idx) -> None:
+                        d["slots"][i]["queue_status"] = "cancelled"
+                        d["slots"][i]["error_message"] = "同图对比队列已取消，该模型未启动。"
+                    self._update_comparison(comparison_id, _mark_cancelled_atomic)
+                except Exception as exc:
+                    err_msg = str(exc)
+
+                    def _mark_err(d: Dict[str, Any], i: int = idx, msg: str = err_msg) -> None:
+                        d["slots"][i]["queue_status"] = "cancelled" if cancel_ev.is_set() else "failed"
+                        d["slots"][i]["error_message"] = msg
+                    self._update_comparison(comparison_id, _mark_err)
+
+            def _finalize(d: Dict[str, Any]) -> None:
+                d["finished_at_epoch"] = time.time()
+                statuses = [s["queue_status"] for s in d["slots"]]
+                if d.get("cancel_requested") or cancel_ev.is_set() or all(s == "cancelled" for s in statuses):
+                    if any(s == "completed" for s in statuses):
+                        d["status"] = "partial_cancelled"
+                    else:
+                        d["status"] = "cancelled"
+                elif all(s == "completed" for s in statuses):
+                    d["status"] = "completed"
+                elif any(s == "completed" for s in statuses):
+                    d["status"] = "partial_completed"
+                else:
+                    d["status"] = "failed"
+            self._update_comparison(comparison_id, _finalize)
+        finally:
+            with self._lock:
+                self._comparison_cancel_events.pop(comparison_id, None)
+                self._cancelled_comparisons.discard(comparison_id)
+                if self._active_comparison_id == comparison_id:
+                    self._active_comparison_id = None
+
+    def create_comparison_from_jobs(
+        self,
+        *,
+        upload_id: str,
+        mode: str,
+        job_ids: Sequence[str],
+        addon_job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Bind existing single-model jobs into a verified same-image comparison record.
+
+        Strictly enforces identical upload_id, identical source_image_sha256, and matching mode
+        so predictions from different images or incompatible configurations can never be mixed.
+        """
+        udir = self._upload_dir(upload_id)
+        meta = json.loads((udir / "upload_meta.json").read_text(encoding="utf-8"))
+        exp_sha = str(meta["source_image_sha256"]).strip().lower()
+        norm_mode = normalize_mode(mode)
+        if not job_ids:
+            raise DemoError("至少需要提供一个 job_id 以构建同图对比。", status_code=400)
+
+        slots: List[Dict[str, Any]] = []
+        seen_models: List[str] = []
+        for idx, raw_jid in enumerate(job_ids):
+            jid = str(raw_jid or "").strip()
+            st = self.get_job_status(jid)
+            if st["upload_id"] != upload_id or str(st.get("source_image_sha256") or "").strip().lower() != exp_sha:
+                raise DemoError(
+                    f"任务 {jid} 属于其他上传图像 (upload_id={st['upload_id']})，严禁跨图混排对比结果。",
+                    status_code=400,
+                )
+            if st["mode"] != norm_mode:
+                raise DemoError(
+                    f"任务 {jid} 的模式 ({st['mode']}) 与对比基线模式 ({norm_mode}) 不一致，拒绝混入同配置对比列。",
+                    status_code=400,
+                )
+            mk = st["model_key"]
+            if mk not in seen_models:
+                seen_models.append(mk)
+            slots.append({
+                "slot_index": idx,
+                "slot_id": f"{mk}_{norm_mode}",
+                "slot_role": "baseline_comparison" if norm_mode in ("W", "T") else "separate_qwen3_enhancement",
+                "model_key": mk,
+                "model_display_name": MODEL_DISPLAY_NAMES[mk],
+                "visual_preprocess_note": MODEL_VISUAL_PREPROCESS_NOTES[mk],
+                "mode": norm_mode,
+                "mode_display_name": MODE_DISPLAY_NAMES[norm_mode],
+                "queue_status": st["status"],
+                "job_id": jid,
+                "error_message": st.get("error_message"),
+            })
+
+        if addon_job_id:
+            ast = self.get_job_status(addon_job_id)
+            if ast["upload_id"] != upload_id or str(ast.get("source_image_sha256") or "").strip().lower() != exp_sha:
+                raise DemoError(
+                    f"增强任务 {addon_job_id} 与当前上传图像身份不一致，拒绝绑定。",
+                    status_code=400,
+                )
+            if ast["model_key"] != "qwen3" or ast["mode"] != "T_B_other":
+                raise DemoError("单独增强项仅允许绑定 Qwen3 的 T_B_other 任务。", status_code=400)
+            slots.append({
+                "slot_index": len(slots),
+                "slot_id": "qwen3_T_B_other",
+                "slot_role": "separate_qwen3_enhancement",
+                "model_key": "qwen3",
+                "model_display_name": MODEL_DISPLAY_NAMES["qwen3"],
+                "visual_preprocess_note": MODEL_VISUAL_PREPROCESS_NOTES["qwen3"],
+                "mode": "T_B_other",
+                "mode_display_name": MODE_DISPLAY_NAMES["T_B_other"],
+                "queue_status": ast["status"],
+                "job_id": addon_job_id,
+                "error_message": ast.get("error_message"),
+            })
+
+        comparison_id = f"cmp_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        cdir = self.comparisons_dir / comparison_id
+        cdir.mkdir(parents=True, exist_ok=True)
+        statuses = [s["queue_status"] for s in slots]
+        overall_st = (
+            "completed" if all(s == "completed" for s in statuses)
+            else "partial_completed" if any(s == "completed" for s in statuses)
+            else "failed"
+        )
+        cmp_doc = {
+            "schema_version": "fics_demo_comparison_v1",
+            "comparison_id": comparison_id,
+            "upload_id": upload_id,
+            "board_id": meta["board_id"],
+            "safe_filename": meta["safe_filename"],
+            "source_image_sha256": meta["source_image_sha256"],
+            "orig_wh": meta["orig_wh"],
+            "roi": {
+                "bbox_half_open": meta["roi_bbox_half_open"],
+                "offset_x": meta["roi_offset_x"],
+                "offset_y": meta["roi_offset_y"],
+                "width": meta["roi_width"],
+                "height": meta["roi_height"],
+                "tile_count": meta["tile_count"],
+                "sha256": (meta.get("roi_export") or {}).get("sha256"),
+            },
+            "baseline_mode": norm_mode,
+            "baseline_mode_display_name": MODE_DISPLAY_NAMES[norm_mode],
+            "model_keys": seen_models,
+            "include_qwen3_b_other": bool(addon_job_id),
+            "status": overall_st,
+            "cancel_requested": False,
+            "created_at": _now_iso(),
+            "started_at_epoch": time.time(),
+            "finished_at_epoch": time.time(),
+            "slots": slots,
+        }
+        _write_json_atomic(cdir / "comparison.json", cmp_doc)
+        return self.get_comparison_status(comparison_id)
+
+    def cancel_comparison(self, comparison_id: str) -> Dict[str, Any]:
+        """Atomically mark comparison cancelled under mutex so no undispatched next slot can start."""
+        cdir = self._comparison_dir(comparison_id)
+        with self._lock:
+            ev = self._comparison_cancel_events.get(comparison_id)
+            active_jid = self._active_job_id
+            if ev is not None:
+                self._cancelled_comparisons.add(comparison_id)
+                ev.set()
+        if ev is not None:
+            def _set_cancel(d: Dict[str, Any]) -> None:
+                d["cancel_requested"] = True
+                for s in d.get("slots") or []:
+                    if s.get("queue_status") == "waiting":
+                        s["queue_status"] = "cancelled"
+                        s["error_message"] = "用户取消了同图对比队列，该模型未启动。"
+            self._update_comparison(comparison_id, _set_cancel)
+        cmp_doc = json.loads((cdir / "comparison.json").read_text(encoding="utf-8"))
+        jids_to_cancel: List[str] = []
+        for s in cmp_doc.get("slots") or []:
+            jid = s.get("job_id")
+            if jid and (jid == active_jid or s.get("queue_status") == "running"):
+                jids_to_cancel.append(str(jid))
+        if active_jid and active_jid not in jids_to_cancel:
+            try:
+                spec_p = self.jobs_dir / active_jid / "job_spec.json"
+                if spec_p.is_file():
+                    spec_doc = json.loads(spec_p.read_text(encoding="utf-8"))
+                    if spec_doc.get("comparison_id") == comparison_id:
+                        jids_to_cancel.append(str(active_jid))
+            except Exception:
+                pass
+        for jid in jids_to_cancel:
+            try:
+                self.cancel_job(jid)
+            except Exception:
+                pass
+        return self.get_comparison_status(comparison_id)
+
+    def get_comparison_status(self, comparison_id: str) -> Dict[str, Any]:
+        """Return enriched multi-model comparison status with strict same-image identity verification."""
+        cdir = self._comparison_dir(comparison_id)
+        doc = json.loads((cdir / "comparison.json").read_text(encoding="utf-8"))
+        exp_uid = str(doc["upload_id"])
+        exp_sha = str(doc["source_image_sha256"]).strip().lower()
+
+        enriched_slots: List[Dict[str, Any]] = []
+        total_elapsed = 0.0
+        for s in doc.get("slots") or []:
+            slot_out = dict(s)
+            jid = s.get("job_id")
+            if jid:
+                st = self.get_job_status(jid)
+                if st["upload_id"] != exp_uid or str(st.get("source_image_sha256") or "").strip().lower() != exp_sha:
+                    raise DemoError(
+                        f"检测到跨图污染异常：对比 {comparison_id} 绑定的任务 {jid} 图像身份不匹配。",
+                        status_code=500,
+                    )
+                slot_out["queue_status"] = st["status"]
+                slot_out["stage_label"] = st["stage_label"]
+                slot_out["elapsed_seconds"] = st["elapsed_seconds"]
+                slot_out["base_calls_planned"] = st["base_calls_planned"]
+                slot_out["base_calls_completed"] = st["base_calls_completed"]
+                slot_out["verifier_calls_planned"] = st["verifier_calls_planned"]
+                slot_out["verifier_calls_completed"] = st["verifier_calls_completed"]
+                slot_out["gpu_gate"] = st["gpu_gate"]
+                slot_out["error_message"] = st.get("error_message") or s.get("error_message")
+                slot_out["outcome"] = st["outcome"]
+                slot_out["has_result"] = st["has_result"]
+                total_elapsed += float(st.get("elapsed_seconds") or 0.0)
+                if st["status"] == "completed" and st["has_result"]:
+                    res = self.get_job_result(jid)
+                    slot_out["kept_predictions_count"] = res["kept_predictions_count"]
+                    slot_out["post_nms_candidates_count"] = res["post_nms_candidates_count"]
+                    slot_out["class_counts"] = res["class_counts"]
+                    slot_out["pre_verifier_class_counts"] = res.get("pre_verifier_class_counts")
+                    slot_out["verifier_summary"] = res.get("verifier_summary")
+                    slot_out["termination_v2"] = res["termination_v2"]
+                    slot_out["predictions"] = res["predictions"]
+                    slot_out["pre_verifier_candidates"] = res.get("pre_verifier_candidates")
+                    slot_out["calls"] = res["calls"]
+                    slot_out["post_hoc_eval"] = res.get("post_hoc_eval")
+                    slot_out["exports"] = {
+                        "json": f"/api/jobs/{jid}/export/json",
+                        "overlay_png": f"/api/jobs/{jid}/export/overlay_png",
+                        "summary_md": f"/api/jobs/{jid}/export/summary_md",
+                    }
+                else:
+                    slot_out["kept_predictions_count"] = None
+                    slot_out["class_counts"] = None
+                    slot_out["termination_v2"] = None
+                    slot_out["predictions"] = None
+                    slot_out["exports"] = None
+            else:
+                q_st = str(s.get("queue_status") or "waiting")
+                slot_out["stage_label"] = "队列等待中" if q_st == "waiting" else ("已取消（未启动）" if q_st == "cancelled" else q_st)
+                slot_out["elapsed_seconds"] = 0.0
+                slot_out["outcome"] = _classify_job_outcome(q_st, error_message=s.get("error_message"))
+                slot_out["has_result"] = False
+                slot_out["kept_predictions_count"] = None
+                slot_out["class_counts"] = None
+                slot_out["termination_v2"] = None
+                slot_out["predictions"] = None
+                slot_out["exports"] = None
+            enriched_slots.append(slot_out)
+
+        end_t = doc.get("finished_at_epoch") or time.time()
+        wall_s = round(max(0.0, float(end_t) - float(doc.get("started_at_epoch") or end_t)), 1)
+        return {
+            "schema_version": "fics_demo_comparison_v1",
+            "comparison_id": comparison_id,
+            "upload_id": exp_uid,
+            "board_id": doc["board_id"],
+            "safe_filename": doc["safe_filename"],
+            "source_image_sha256": doc["source_image_sha256"],
+            "orig_wh": doc["orig_wh"],
+            "roi": doc["roi"],
+            "baseline_mode": doc["baseline_mode"],
+            "baseline_mode_display_name": doc["baseline_mode_display_name"],
+            "model_keys": doc["model_keys"],
+            "include_qwen3_b_other": doc.get("include_qwen3_b_other", False),
+            "status": doc["status"],
+            "cancel_requested": bool(doc.get("cancel_requested")),
+            "created_at": doc["created_at"],
+            "wall_elapsed_seconds": wall_s,
+            "sum_job_elapsed_seconds": round(total_elapsed, 1),
+            "class_cn_names": dict(CLASS_CN_NAMES),
+            "gt_free_notice": (
+                "模型预测 / 未做精度评价（GT-free）：当前无人工真值，仅展示各模型预测框与类别统计；"
+                "预测框数不代表板上真实元器件数，不计算准确率/F1，score=1.0 仅为固定占位符而非概率置信度。"
+            ),
+            "zero_box_semantics_notice": (
+                "“无有效框”仅表示该模型在当前模式下未解析出合法目标框，不等于电路板上没有元器件；"
+                "模型输出截断、格式不合规或运行失败均如实标记，不伪装为显式空预测 []。"
+            ),
+            "slots": enriched_slots,
+        }
+
+    def list_comparisons(self, limit: int = 20, upload_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        if not self.comparisons_dir.is_dir():
+            return items
+        for d in sorted(self.comparisons_dir.iterdir(), key=lambda p: p.name, reverse=True):
+            if not d.is_dir() or not (d / "comparison.json").is_file():
+                continue
+            try:
+                st = self.get_comparison_status(d.name)
+                if upload_id and st.get("upload_id") != upload_id:
+                    continue
+                items.append(st)
+            except Exception:
+                continue
+            if len(items) >= int(limit):
+                break
+        return items
+
+    def export_comparison(self, *, comparison_id: str, kind: str = "markdown") -> Tuple[bytes, str, str]:
+        """Export lightweight same-image multi-model comparison report (JSON or Markdown).
+
+        Unfinished, cancelled, or failed models never emit fake empty prediction tables or export links.
+        """
+        cmp_data = self.get_comparison_status(comparison_id)
+        k = str(kind or "markdown").strip().lower()
+        if k == "json":
+            export_doc = dict(cmp_data)
+            # Strip heavy per-box/call arrays in lightweight JSON summary while preserving counts, status, and export refs
+            compact_slots = []
+            for s in cmp_data["slots"]:
+                cs = {
+                    key: s.get(key)
+                    for key in (
+                        "slot_index",
+                        "slot_id",
+                        "slot_role",
+                        "model_key",
+                        "model_display_name",
+                        "visual_preprocess_note",
+                        "mode",
+                        "mode_display_name",
+                        "queue_status",
+                        "job_id",
+                        "elapsed_seconds",
+                        "outcome",
+                        "kept_predictions_count",
+                        "post_nms_candidates_count",
+                        "class_counts",
+                        "verifier_summary",
+                        "termination_v2",
+                        "error_message",
+                        "exports",
+                    )
+                }
+                compact_slots.append(cs)
+            export_doc["slots"] = compact_slots
+            blob = (json.dumps(export_doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+            return blob, "application/json; charset=utf-8", f"{comparison_id}_comparison.json"
+
+        if k in ("markdown", "md", "summary_md"):
+            roi = cmp_data["roi"]
+            lines = [
+                f"# FICS-PCB 同图多模型检测对比报告 ({comparison_id})",
+                "",
+                "## 1. 共同图像身份与坐标基准",
+                f"- **上传文件名**：`{cmp_data['safe_filename']}` (`upload_id={cmp_data['upload_id']}`)",
+                f"- **原图 SHA-256**：`{cmp_data['source_image_sha256']}`",
+                f"- **原图尺寸**：`{cmp_data['orig_wh'][0]} × {cmp_data['orig_wh'][1]}` px",
+                f"- **ROI 区域（阈值 <248 + 32px）**：`{roi['width']} × {roi['height']}` px | 偏移 `({roi['offset_x']}, {roi['offset_y']})` | 1024px 切片数：`{roi['tile_count']}`",
+                f"- **对比基线模式**：`{cmp_data['baseline_mode_display_name']}` (`{cmp_data['baseline_mode']}`)",
+                f"- **队列总体状态**：`{cmp_data['status']}` | 累计模型推理耗时：`{cmp_data['sum_job_elapsed_seconds']}s`",
+                f"- **评价口径声明**：{cmp_data['gt_free_notice']}",
+                f"- **零框与异常状态说明**：{cmp_data['zero_box_semantics_notice']}",
+                "",
+                "## 2. 同配置基线模型对比汇总",
+                "",
+                "| 模型名称 | 模式 | 运行/结果状态 | 耗时 (s) | 预测总框数 | 电容 (capacitor) | 电阻 (resistor) | 电感 (inductor) | 晶体管 (transistor) | 二极管 (diode) | 集成电路 (ic) | 终止与解析说明 |",
+                "| :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+            ]
+            baseline_slots = [s for s in cmp_data["slots"] if s.get("slot_role") != "separate_qwen3_enhancement"]
+            addon_slots = [s for s in cmp_data["slots"] if s.get("slot_role") == "separate_qwen3_enhancement"]
+
+            def _row_for_slot(s: Mapping[str, Any]) -> str:
+                out = s.get("outcome") or {}
+                if s.get("queue_status") == "completed" and s.get("has_result"):
+                    cc = s.get("class_counts") or {}
+                    tv2 = s.get("termination_v2") or {}
+                    term_txt = (
+                        f"EOS={tv2.get('normal_eos', 0)}/{tv2.get('total_calls', 0)}, "
+                        f"限长={tv2.get('length_limited_without_eos', 0)}, "
+                        f"空数组={tv2.get('explicit_empty', 0)}"
+                    )
+                    return (
+                        f"| `{s['model_display_name']}` | `{s['mode']}` | **{out.get('outcome_label')}** | "
+                        f"{s.get('elapsed_seconds', 0.0)} | **{s.get('kept_predictions_count', 0)}** | "
+                        f"{cc.get('capacitor', 0)} | {cc.get('resistor', 0)} | {cc.get('inductor', 0)} | "
+                        f"{cc.get('transistor', 0)} | {cc.get('diode', 0)} | {cc.get('ic', 0)} | {term_txt} |"
+                    )
+                reason = s.get("error_message") or out.get("outcome_note") or "未完成有效推理"
+                return (
+                    f"| `{s['model_display_name']}` | `{s['mode']}` | **{out.get('outcome_label', s.get('queue_status'))}** | "
+                    f"{s.get('elapsed_seconds', 0.0)} | —（未生成） | — | — | — | — | — | — | {reason} |"
+                )
+
+            for s in baseline_slots:
+                lines.append(_row_for_slot(s))
+
+            if addon_slots:
+                lines.extend([
+                    "",
+                    "## 3. 单独冻结增强模式对照（非同配置 W 基线）",
+                    "",
+                    "| 模型名称 | 增强模式 | 运行/结果状态 | 耗时 (s) | 保留总框数 | 电容 | 电阻 | 电感 | 晶体管 | 二极管 | 集成电路 | 核验过滤与终止说明 |",
+                    "| :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+                ])
+                for s in addon_slots:
+                    lines.append(_row_for_slot(s))
+
+            lines.extend(["", "## 4. 逐模型原生预处理与导出文件引用"])
+            for s in cmp_data["slots"]:
+                out = s.get("outcome") or {}
+                lines.append(f"### {s['model_display_name']} (`{s['model_key']}` · `{s['mode']}`)")
+                lines.append(f"- **原生视觉预处理**：{s.get('visual_preprocess_note')}")
+                lines.append(f"- **任务 ID**：`{s.get('job_id') or '未启动'}` | **状态**：{out.get('outcome_label')} — {out.get('outcome_note')}")
+                exps = s.get("exports")
+                if exps:
+                    lines.append(f"- **单模型导出引用**：JSON `{exps['json']}` | 标注图 PNG `{exps['overlay_png']}` | 摘要 Markdown `{exps['summary_md']}`")
+                else:
+                    lines.append("- **单模型导出引用**：该模型未完成有效推理，不生成导出文件。")
+                lines.append("")
+
+            blob = ("\n".join(lines) + "\n").encode("utf-8")
+            return blob, "text/markdown; charset=utf-8", f"{comparison_id}_comparison.md"
+
+        raise DemoError(f"不支持的对比报告导出格式：{kind!r}；仅支持 json 或 markdown。", status_code=400)

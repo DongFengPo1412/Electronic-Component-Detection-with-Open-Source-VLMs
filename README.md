@@ -49,7 +49,7 @@
   - `src/pcb_vlm/evaluation/tile_consistency.py` & `scripts/eval_tile_consistency.py` — 开发集候选对照方法 `A`（跨切片一致性过滤）
   - `src/pcb_vlm/evaluation/candidate_verifier.py` & `src/pcb_vlm/inference/candidate_verifier_runner.py` & `scripts/run_candidate_verifier.py` — 冻结方法 `B_other`（候选框 10% 外扩裁剪与二阶段分类核验）
   - `src/pcb_vlm/evaluation/gt_free_pipeline.py` — 无 GT 上传图重映射、切片去重与 `B_other` 过滤导出链路
-  - `src/pcb_vlm/evaluation/final_demo_service.py` & `scripts/fics_final_demo.py` — 完整端到端演示后端与双页签 Web UI（无 GT 新图实时推理、可安全取消子进程树、可选事后 GT 身份核验与只读 8 板研究回放）
+  - `src/pcb_vlm/evaluation/final_demo_service.py` & `scripts/fics_final_demo.py` — 完整端到端演示后端与双页签 Web UI（无 GT 新图上传、单模型与三模型同图串行对比队列 `/api/comparisons`、6 类中英文筛选与颜色图例、原图/ROI 坐标对齐切换、轻量同图对比报告导出、前端会话代号与 `AbortController` 防跨任务迟到响应串台/停轮询、同会话单飞与终态锁防重叠轮询回退、只读回放示例前后端双重重推拦截、`--config relative_to` 便携路径锚点、后端取消与派发原子锁、可安全取消子进程树、可选事后 GT 身份核验、只读 8 板研究回放与离线轻量包只读回放降级提示）
 
 ---
 
@@ -80,7 +80,7 @@ python scripts/fics_final_demo.py \
   --results-index /path/to/results_index.json \
   --host 127.0.0.1 --port 7862
 ```
-- 新图上传推理全过程**严格不读取 Ground Truth**（结果页默认标记“未评价”）。
+- 新图上传推理全过程**严格不读取 Ground Truth**（结果页默认标记“模型预测 / 未做精度评价”，不把预测框数等同于真实器件数，不展示 `score=1.0` 为 100% 置信度）；支持单模型运行与 **三模型（`Qwen2-VL-2B-Instruct`、`deepseek-vl-1.3b-chat（v1）`、`Qwen3-VL-2B-Instruct`）同图串行队列对比**，界面显式区分“完成（检出预测框）”、“无有效框（不等于板上无元器件）”与“运行失败/已取消（不生成伪造空成绩）”。
 - 事后上传可选 COCO GT 时，系统校验类别、像素尺寸及声明 SHA-256（**已知哈希冲突直接拒绝**）；若无 SHA 且文件名不一致（即使单图 COCO 或指定了 `target_image_id`），必须由用户显式勾选人工确认并如实标记 `image_identity_verified=false`。当某类 GT 支持数为 `0` 时，Recall 与 F1 规范输出 `null` / `N/A (GT=0)` 并保留真实 `FP` 计数。
 
 ### 3.3 集成推理入口与离线 CPU 回放
