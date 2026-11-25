@@ -19,6 +19,7 @@ from pcb_vlm.data.fics_dslr import file_sha256
 from pcb_vlm.evaluation.candidate_verifier import (
     ALLOWED_SEVEN_LABELS,
     TARGET_SIX_CLASSES,
+    apply_dual_crop_consensus_policy,
     apply_verifier_filter_policy,
     build_candidate_verifier_manifest,
     parse_single_label_json,
@@ -148,6 +149,7 @@ def reconstruct_board_predictions_gt_free(
     max_new_tokens: int = 512,
     nms_iou_threshold: float = 0.50,
     allowed_classes: Sequence[str] = FICS_SIX_CLASSES,
+    coordinate_protocol: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Reconstruct global board predictions from raw JSONL records without any GT.
 
@@ -218,6 +220,7 @@ def reconstruct_board_predictions_gt_free(
 
     orig_w, orig_h = int(orig_wh[0]), int(orig_wh[1])
     raw_global_preds: List[Dict[str, Any]] = []
+    protocols_seen: set[str] = set()
     for rec in ordered:
         if "raw_output" in rec and rec["raw_output"] is not None:
             raw_text = str(rec["raw_output"])
@@ -228,6 +231,8 @@ def reconstruct_board_predictions_gt_free(
 
         in_w = rec["orig_input_width"] if rec.get("orig_input_width") is not None else rec["width"]
         in_h = rec["orig_input_height"] if rec.get("orig_input_height") is not None else rec["height"]
+        rec_proto = str(rec.get("coordinate_protocol") or coordinate_protocol or "xyxy_norm1000")
+        protocols_seen.add(rec_proto)
 
         v2 = classify_call_termination_and_parse_v2(
             raw_text=raw_text,
@@ -237,7 +242,7 @@ def reconstruct_board_predictions_gt_free(
             max_new_tokens=int(rec.get("max_new_tokens") or max_new_tokens),
             generated_token_ids=rec.get("generated_token_ids"),
             eos_token_ids=eos_token_ids,
-            protocol="xyxy_norm1000",
+            protocol=rec_proto,
             allowed_classes=allowed_classes,
         )
         off_x = int(rec["tile_offset_x"]) + int(rec["roi_offset_x"])
@@ -256,6 +261,7 @@ def reconstruct_board_predictions_gt_free(
                 "label": obj["label"],
                 "bbox_xyxy": gbox,
                 "score": 1.0,
+                "coordinate_protocol": rec_proto,
             })
 
     if str(mode) == "T":
@@ -265,6 +271,11 @@ def reconstruct_board_predictions_gt_free(
         after_merge = list(raw_global_preds)
         nms_applied = False
 
+    resolved_proto = (
+        next(iter(protocols_seen))
+        if len(protocols_seen) == 1
+        else (str(coordinate_protocol or "xyxy_norm1000"))
+    )
     structured = [
         {
             "prediction_id": f"{board_id}_{mode}_p{idx:03d}",
@@ -274,6 +285,7 @@ def reconstruct_board_predictions_gt_free(
             "label": p["label"],
             "bbox_xyxy": p["bbox_xyxy"],
             "score": float(p.get("score", 1.0)),
+            "coordinate_protocol": p.get("coordinate_protocol", resolved_proto),
         }
         for idx, p in enumerate(after_merge)
     ]
@@ -282,6 +294,7 @@ def reconstruct_board_predictions_gt_free(
         "board_id": str(board_id),
         "image_id": int(image_id),
         "mode": str(mode),
+        "coordinate_protocol": resolved_proto,
         "nms_applied": nms_applied,
         "technical_complete": True,
         "planned_calls": len(ordered),
@@ -325,17 +338,12 @@ def prepare_verifier_manifest_gt_free(
     return manifest, integrity
 
 
-def export_verified_predictions_gt_free(
+def _index_verifier_rows(
     *,
     manifest: Mapping[str, Any],
     verifier_rows: Sequence[Mapping[str, Any]],
     allowed_labels: Sequence[str] = ALLOWED_SEVEN_LABELS,
-    target_classes: Sequence[str] = TARGET_SIX_CLASSES,
-    policy: str = "B_other",
-    allow_incomplete: bool = False,
-    output_path: Optional[pathlib.Path] = None,
-) -> Dict[str, Any]:
-    """Apply frozen verifier filter policy cleanly without GT and return per-board kept objects."""
+) -> Tuple[Dict[str, Dict[str, Any]], List[str], List[str]]:
     expected_call_ids = {
         str(p.get("unique_call_id") or p.get("call_id"))
         for p in manifest["predictions"]
@@ -362,27 +370,17 @@ def export_verified_predictions_gt_free(
             rec["compat_regex_label"] = parsed["compat_regex_label"]
             rec["parse_error"] = parsed["parse_error"]
         records_by_cid[cid] = rec
+    return records_by_cid, duplicate_call_ids, unexpected_call_ids
 
-    filtered = apply_verifier_filter_policy(
-        predictions=manifest["predictions"],
-        verification_records_by_call_id=records_by_cid,
-        policy=policy,
-        target_classes=target_classes,
-    )
-    if (not filtered["technical_complete"] or duplicate_call_ids or unexpected_call_ids) and not allow_incomplete:
-        raise RuntimeError(
-            "Verifier outputs are technically incomplete or contain duplicate/unexpected call IDs; "
-            "refusing silent background rejection: "
-            + json.dumps(
-                {
-                    "counts": filtered["counts"],
-                    "duplicate_call_ids": duplicate_call_ids,
-                    "unexpected_call_ids": unexpected_call_ids,
-                },
-                ensure_ascii=False,
-            )
-        )
 
+def _assemble_verified_payload(
+    *,
+    manifest: Mapping[str, Any],
+    filtered: Mapping[str, Any],
+    policy: str,
+    tech_ok: bool,
+    output_path: Optional[pathlib.Path],
+) -> Dict[str, Any]:
     preds_list = list(manifest["predictions"])
     img_id_by_board = {str(p["board_id"]): p.get("image_id") for p in preds_list}
     decisions = list(filtered["decisions"])
@@ -410,9 +408,7 @@ def export_verified_predictions_gt_free(
     payload: Dict[str, Any] = {
         "schema_version": "gt_free_verified_predictions_v1",
         "policy": policy,
-        "technical_complete": bool(
-            filtered["technical_complete"] and not duplicate_call_ids and not unexpected_call_ids
-        ),
+        "technical_complete": bool(tech_ok),
         "summary": filtered["counts"],
         "per_board": by_board,
     }
@@ -421,3 +417,113 @@ def export_verified_predictions_gt_free(
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return payload
+
+
+def export_verified_predictions_gt_free(
+    *,
+    manifest: Mapping[str, Any],
+    verifier_rows: Sequence[Mapping[str, Any]],
+    allowed_labels: Sequence[str] = ALLOWED_SEVEN_LABELS,
+    target_classes: Sequence[str] = TARGET_SIX_CLASSES,
+    policy: str = "B_other",
+    allow_incomplete: bool = False,
+    output_path: Optional[pathlib.Path] = None,
+) -> Dict[str, Any]:
+    """Apply frozen verifier filter policy cleanly without GT and return per-board kept objects."""
+    records_by_cid, duplicate_call_ids, unexpected_call_ids = _index_verifier_rows(
+        manifest=manifest,
+        verifier_rows=verifier_rows,
+        allowed_labels=allowed_labels,
+    )
+    filtered = apply_verifier_filter_policy(
+        predictions=manifest["predictions"],
+        verification_records_by_call_id=records_by_cid,
+        policy=policy,
+        target_classes=target_classes,
+    )
+    tech_ok = bool(filtered["technical_complete"] and not duplicate_call_ids and not unexpected_call_ids)
+    if not tech_ok and not allow_incomplete:
+        raise RuntimeError(
+            "Verifier outputs are technically incomplete or contain duplicate/unexpected call IDs; "
+            "refusing silent background rejection: "
+            + json.dumps(
+                {
+                    "counts": filtered["counts"],
+                    "duplicate_call_ids": duplicate_call_ids,
+                    "unexpected_call_ids": unexpected_call_ids,
+                },
+                ensure_ascii=False,
+            )
+        )
+    return _assemble_verified_payload(
+        manifest=manifest,
+        filtered=filtered,
+        policy=policy,
+        tech_ok=tech_ok,
+        output_path=output_path,
+    )
+
+
+def export_dual_crop_consensus_gt_free(
+    *,
+    stage1_manifest: Mapping[str, Any],
+    stage1_verifier_rows: Sequence[Mapping[str, Any]],
+    stage2_manifest: Optional[Mapping[str, Any]],
+    stage2_verifier_rows: Sequence[Mapping[str, Any]],
+    allowed_labels: Sequence[str] = ALLOWED_SEVEN_LABELS,
+    target_classes: Sequence[str] = TARGET_SIX_CLASSES,
+    allow_incomplete: bool = False,
+    output_path: Optional[pathlib.Path] = None,
+) -> Dict[str, Any]:
+    """Export Round 7 dual-crop (`10% + 40%`) consensus predictions cleanly without GT."""
+    s1_records, s1_dups, s1_unexp = _index_verifier_rows(
+        manifest=stage1_manifest,
+        verifier_rows=stage1_verifier_rows,
+        allowed_labels=allowed_labels,
+    )
+    if stage2_manifest is not None:
+        s2_records, s2_dups, s2_unexp = _index_verifier_rows(
+            manifest=stage2_manifest,
+            verifier_rows=stage2_verifier_rows,
+            allowed_labels=allowed_labels,
+        )
+        s2_preds_by_pid = {str(p["prediction_id"]): p for p in stage2_manifest.get("predictions") or []}
+    else:
+        s2_records, s2_dups, s2_unexp = {}, [], []
+        s2_preds_by_pid = {}
+
+    filtered = apply_dual_crop_consensus_policy(
+        stage1_predictions=stage1_manifest["predictions"],
+        stage1_records_by_call_id=s1_records,
+        stage2_predictions_by_pid=s2_preds_by_pid,
+        stage2_records_by_call_id=s2_records,
+        target_classes=target_classes,
+    )
+    tech_ok = bool(
+        filtered["technical_complete"]
+        and not s1_dups
+        and not s1_unexp
+        and not s2_dups
+        and not s2_unexp
+    )
+    if not tech_ok and not allow_incomplete:
+        raise RuntimeError(
+            "Dual-crop verifier outputs are technically incomplete or contain duplicate/unexpected call IDs: "
+            + json.dumps(
+                {
+                    "counts": filtered["counts"],
+                    "stage1_duplicate_call_ids": s1_dups,
+                    "stage1_unexpected_call_ids": s1_unexp,
+                    "stage2_duplicate_call_ids": s2_dups,
+                    "stage2_unexpected_call_ids": s2_unexp,
+                },
+                ensure_ascii=False,
+            )
+        )
+    return _assemble_verified_payload(
+        manifest=stage1_manifest,
+        filtered=filtered,
+        policy="B_other_dual_crop_consensus",
+        tech_ok=tech_ok,
+        output_path=output_path,
+    )

@@ -25,6 +25,7 @@ from pcb_vlm.inference.fics_matrix import (
     _stream_worker_stderr,
     _stream_worker_stdout,
 )
+from pcb_vlm.inference.fics_worker import _probe_effective_generation
 from pcb_vlm.inference.gpu_gate import probe_gpu_gate
 
 _SRC_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -113,6 +114,7 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
             pil_img = im_raw.convert("RGB")
         assert pil_img.size == (entry["width"], entry["height"])
 
+        t_prep0 = time.perf_counter()
         messages = [{
             "role": "user",
             "content": [
@@ -122,6 +124,7 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
         }]
         text_in = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs_cpu = processor(text=[text_in], images=[pil_img], return_tensors="pt")
+        cpu_ms = round((time.perf_counter() - t_prep0) * 1000.0, 2)
         patch_size = int(getattr(processor.image_processor, "patch_size", 16))
         merge_size = int(getattr(processor.image_processor, "merge_size", 2))
         grid = [int(x) for x in inputs_cpu["image_grid_thw"][0].tolist()]
@@ -144,11 +147,32 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
             if hasattr(call_gen_cfg, attr):
                 setattr(call_gen_cfg, attr, None)
 
+        eff_probe = _probe_effective_generation(
+            model,
+            call_gen_cfg,
+            declared_do_sample=False,
+            explicit_do_sample_false=True,
+            transformers_version=str(transformers.__version__),
+            extra_kwargs={
+                "max_new_tokens": int(spec["max_new_tokens"]),
+                "repetition_penalty": 1.0,
+                "eos_token_id": eos_ids,
+                "pad_token_id": 151643,
+            },
+        )
+        if eff_probe.get("effective_do_sample") or eff_probe.get("effective_generation_mode") != "GenerationMode.GREEDY_SEARCH":
+            raise RuntimeError(f"Expected effective GREEDY_SEARCH for verifier, got {eff_probe}")
+
         torch.cuda.reset_peak_memory_stats(0)
         torch.cuda.synchronize(0)
         t0 = time.perf_counter()
         with torch.inference_mode():
-            out_ids = model.generate(**inputs_cuda, generation_config=call_gen_cfg, use_cache=True)
+            out_ids = model.generate(
+                **inputs_cuda,
+                generation_config=call_gen_cfg,
+                do_sample=False,
+                use_cache=True,
+            )
         torch.cuda.synchronize(0)
         gpu_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
@@ -157,6 +181,7 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
         has_eos = bool(gen_ids and gen_ids[-1] in eos_ids)
         parsed = parse_single_label_json(raw_out, allowed_labels=allowed_labels)
         peak_mib = round(torch.cuda.max_memory_allocated(0) / (1024 * 1024), 2)
+        peak_res_mib = round(torch.cuda.max_memory_reserved(0) / (1024 * 1024), 2)
 
         del inputs_cuda, out_ids
         gc.collect()
@@ -166,14 +191,21 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
             "call_id": entry["call_id"],
             "sample_index": entry["sample_index"],
             "neutral_filename": entry["neutral_filename"],
+            "width": int(entry["width"]),
+            "height": int(entry["height"]),
             "input_sha256": actual_sha,
             "prompt_sha256": prompt_sha,
             "model_repo_id": spec["model_repo_id"],
             "model_revision": spec["model_revision"],
+            "planned_qwen_min_pixels": int(spec["min_pixels"]),
+            "planned_qwen_max_pixels": int(spec["max_pixels"]),
             "processed_width_px": proc_w,
             "processed_height_px": proc_h,
             "processed_area_px": proc_w * proc_h,
+            "image_grid_thw": grid,
             "merged_visual_tokens": merged_vis_toks,
+            "max_new_tokens": int(spec["max_new_tokens"]),
+            "effective_generation_probe": eff_probe,
             "generated_tokens": len(gen_ids),
             "has_normal_eos": has_eos,
             "raw_output": raw_out,
@@ -181,8 +213,10 @@ def run_verifier_worker(manifest_path: pathlib.Path) -> int:
             "strict_label": parsed["strict_label"],
             "compat_regex_label": parsed["compat_regex_label"],
             "parse_error": parsed["parse_error"],
+            "cpu_preprocess_ms": cpu_ms,
             "gpu_generate_ms": gpu_ms,
             "cuda_max_allocated_mib": peak_mib,
+            "cuda_max_reserved_mib": peak_res_mib,
             "ok": True,
         }
         _emit_ipc({
@@ -408,6 +442,7 @@ def run_verifier_supervised(
         "wall_seconds": round(time.perf_counter() - t_stage0, 3),
         "total_gpu_generate_ms": round(sum(float(r.get("gpu_generate_ms") or 0.0) for r in ok_rows), 2),
         "max_cuda_allocated_mib": max((float(r.get("cuda_max_allocated_mib") or 0.0) for r in ok_rows), default=None),
+        "max_cuda_reserved_mib": max((float(r.get("cuda_max_reserved_mib") or 0.0) for r in ok_rows), default=None),
         "gpu_gate": gate,
         "verified_inputs": verified,
     }

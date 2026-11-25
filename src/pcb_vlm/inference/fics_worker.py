@@ -233,6 +233,37 @@ def _resolve_call_image_path(
     return resolved
 
 
+def _probe_effective_generation(
+    gen_model: Any,
+    gen_cfg: Any,
+    *,
+    declared_do_sample: bool,
+    explicit_do_sample_false: bool,
+    transformers_version: str,
+    extra_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Probe Transformers' actual resolved GenerationConfig & GenerationMode."""
+    from transformers import GenerationConfig
+
+    cloned_cfg = GenerationConfig.from_dict(gen_cfg.to_dict()) if gen_cfg is not None else None
+    probe_kwargs: Dict[str, Any] = dict(extra_kwargs or {})
+    if explicit_do_sample_false:
+        probe_kwargs["do_sample"] = False
+    prep_cfg, leftover_kwargs = gen_model._prepare_generation_config(cloned_cfg, **probe_kwargs)
+    return {
+        "declared_do_sample": bool(declared_do_sample),
+        "explicit_do_sample_kwarg_passed": bool(explicit_do_sample_false),
+        "effective_do_sample": bool(getattr(prep_cfg, "do_sample", False)),
+        "effective_generation_mode": str(prep_cfg.get_generation_mode()),
+        "effective_temperature": getattr(prep_cfg, "temperature", None),
+        "effective_top_p": getattr(prep_cfg, "top_p", None),
+        "effective_top_k": getattr(prep_cfg, "top_k", None),
+        "effective_repetition_penalty": getattr(prep_cfg, "repetition_penalty", None),
+        "leftover_model_kwargs_keys": sorted(str(k) for k in leftover_kwargs.keys()),
+        "transformers_version": transformers_version,
+    }
+
+
 def run_single_call(
     *,
     model_key: str,
@@ -250,12 +281,16 @@ def run_single_call(
     model_repo_id: str,
     model_revision: Optional[str],
     expected_prompt_sha256: str,
+    default_coord_protocol: str = "xyxy_norm1000",
+    default_explicit_do_sample_false: bool = False,
+    allowed_prompt_sha256s: Optional[set[str]] = None,
     emit_stage: Callable[[str, Dict[str, Any]], None],
     path_remaps: Optional[Sequence[Tuple[str, str]]] = None,
     image_hash_index: Optional[Dict[str, pathlib.Path]] = None,
 ) -> Dict[str, Any]:
     """Execute one deterministic single-image inference call and emit full provenance record."""
     import torch
+    import transformers
     from PIL import Image
 
     t_call0 = time.perf_counter()
@@ -264,8 +299,17 @@ def run_single_call(
     actual_sha = sha256_file(img_path)
     if actual_sha != req["expected_sha256"]:
         raise RuntimeError(f"Input SHA mismatch for {img_path}: {actual_sha} != {req['expected_sha256']}")
-    if req["prompt_sha256"] != expected_prompt_sha256 or sha256_text(req["prompt"]) != expected_prompt_sha256:
-        raise RuntimeError(f"Prompt SHA mismatch: {req['prompt_sha256']} != {expected_prompt_sha256}")
+    call_expected_prompt_sha = str(req.get("prompt_sha256") or expected_prompt_sha256).lower()
+    allowed_set = allowed_prompt_sha256s if allowed_prompt_sha256s is not None else {expected_prompt_sha256.lower()}
+    if req["prompt_sha256"].lower() not in allowed_set or sha256_text(req["prompt"]) != call_expected_prompt_sha:
+        raise RuntimeError(f"Prompt SHA mismatch: {req['prompt_sha256']} not in {sorted(allowed_set)}")
+
+    call_coord_proto = str(req.get("coordinate_protocol") or default_coord_protocol or "xyxy_norm1000")
+    use_explicit_do_sample_false = bool(
+        req.get("explicit_do_sample_false")
+        if req.get("explicit_do_sample_false") is not None
+        else default_explicit_do_sample_false
+    )
 
     with Image.open(img_path) as im_raw:
         pil_img = im_raw.convert("RGB")
@@ -279,6 +323,8 @@ def run_single_call(
         "orig_width": orig_w,
         "orig_height": orig_h,
         "max_new_tokens": max_new_tokens,
+        "coordinate_protocol": call_coord_proto,
+        "explicit_do_sample_false": use_explicit_do_sample_false,
     })
 
     rec: Dict[str, Any] = {
@@ -302,7 +348,8 @@ def run_single_call(
         "tile_offset_y": int(req["tile_offset_y"]),
         "max_new_tokens": max_new_tokens,
         "prompt_sha256": req["prompt_sha256"],
-        "coordinate_protocol": "xyxy_norm1000",
+        "coordinate_protocol": call_coord_proto,
+        "explicit_do_sample_false": use_explicit_do_sample_false,
         "model_key": model_key,
         "model_repo_id": model_repo_id,
         "model_revision": model_revision,
@@ -398,8 +445,10 @@ def run_single_call(
             proc_payload = {
                 "cpu_preprocess_ms": cpu_preprocess_ms,
                 "h2d_transfer_ms": h2d_transfer_ms,
-                "processed_width_px": proc_w,
-                "processed_height_px": proc_h,
+                "planned_qwen_min_pixels": qwen_min_pixels,
+                "planned_qwen_max_pixels": qwen_max_pixels,
+                "processed_width_px": int(proc_w),
+                "processed_height_px": int(proc_h),
                 "processed_area_px": proc_area,
                 "image_grid_thw": grid,
                 "pixel_values_shape": px_shape,
@@ -422,22 +471,46 @@ def run_single_call(
                 if hasattr(call_gen_cfg, attr):
                     setattr(call_gen_cfg, attr, None)
 
-            hook_handle = _attach_step1_lm_head_hook(model.lm_head, hook_state)
+            eff_probe = _probe_effective_generation(
+                model,
+                call_gen_cfg,
+                declared_do_sample=False,
+                explicit_do_sample_false=use_explicit_do_sample_false,
+                transformers_version=str(transformers.__version__),
+            )
+            if use_explicit_do_sample_false:
+                if eff_probe["effective_do_sample"] is not False or "GREEDY_SEARCH" not in eff_probe["effective_generation_mode"]:
+                    raise RuntimeError(
+                        f"Explicit do_sample=False failed to lock greedy decoding for {model_key}: {eff_probe}"
+                    )
+            rec["effective_generation_probe"] = eff_probe
+
+            lm_head_mod = model.get_output_embeddings()
+            if lm_head_mod is None:
+                lm_head_mod = model.lm_head
+            hook_handle = _attach_step1_lm_head_hook(lm_head_mod, hook_state)
             t_gen0 = time.perf_counter()
             streamer = make_first_step_streamer(emit_stage, t_gen0, hook_state)
             emit_stage("generation_started", {
                 "max_new_tokens": max_new_tokens,
                 "do_sample": False,
+                "explicit_do_sample_false_kwarg": use_explicit_do_sample_false,
+                "effective_generation_probe": eff_probe,
                 "repetition_penalty": rep_pen,
                 "extra_prefill_forward_executed": False,
             })
 
+            gen_call_kwargs: Dict[str, Any] = {
+                "generation_config": call_gen_cfg,
+                "use_cache": True,
+                "streamer": streamer,
+            }
+            if use_explicit_do_sample_false:
+                gen_call_kwargs["do_sample"] = False
             with torch.inference_mode():
                 out_ids = model.generate(
                     **inputs_cuda,
-                    generation_config=call_gen_cfg,
-                    use_cache=True,
-                    streamer=streamer,
+                    **gen_call_kwargs,
                 )
             torch.cuda.synchronize(0)
             gpu_generate_ms = round((time.perf_counter() - t_gen0) * 1000.0, 2)
@@ -483,12 +556,29 @@ def run_single_call(
             emit_stage("processor_done", proc_payload)
 
             gen_model = getattr(model, "language_model", model)
+            eff_probe = _probe_effective_generation(
+                gen_model,
+                None,
+                declared_do_sample=False,
+                explicit_do_sample_false=True,
+                transformers_version=str(transformers.__version__),
+                extra_kwargs={
+                    "pad_token_id": pad_id,
+                    "bos_token_id": bos_id,
+                    "eos_token_id": eos_ids[0],
+                    "max_new_tokens": max_new_tokens,
+                    "repetition_penalty": rep_pen,
+                },
+            )
+            rec["effective_generation_probe"] = eff_probe
             hook_handle = _attach_step1_lm_head_hook(gen_model.lm_head, hook_state)
             t_gen0 = time.perf_counter()
             streamer = make_first_step_streamer(emit_stage, t_gen0, hook_state)
             emit_stage("generation_started", {
                 "max_new_tokens": max_new_tokens,
                 "do_sample": False,
+                "explicit_do_sample_false_kwarg": True,
+                "effective_generation_probe": eff_probe,
                 "repetition_penalty": rep_pen,
                 "extra_prefill_forward_executed": False,
             })
@@ -523,7 +613,7 @@ def run_single_call(
             max_new_tokens=max_new_tokens,
             generated_token_ids=gen_ids,
             eos_token_ids=eos_ids,
-            protocol="xyxy_norm1000",
+            protocol=call_coord_proto,
             allowed_classes=FICS_SIX_CLASSES,
         )
         finish_reason = (
@@ -616,7 +706,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     fics_cfg = load_fics_six_class_config()
-    expected_prompt_sha256 = str(fics_cfg["protocol"]["prompt_sha256"]).lower()
+    inf_cfg = plan["inference_config"]
+    expected_prompt_sha256 = str(
+        model_cfg.get("prompt_sha256")
+        or inf_cfg.get("prompt_sha256")
+        or fics_cfg["protocol"]["prompt_sha256"]
+    ).lower()
+    allowed_prompt_sha256s = {
+        str(x).lower()
+        for x in (inf_cfg.get("allowed_prompt_sha256s") or [expected_prompt_sha256])
+    }
+    default_coord_protocol = str(
+        model_cfg.get("coordinate_protocol")
+        or inf_cfg.get("coordinate_protocol")
+        or fics_cfg["protocol"].get("coordinate_protocol")
+        or "xyxy_norm1000"
+    )
+    dsf_raw = model_cfg.get("explicit_do_sample_false")
+    if dsf_raw is None:
+        dsf_raw = inf_cfg.get("explicit_do_sample_false", False)
+    default_explicit_do_sample_false = bool(dsf_raw)
     model_dir = str(rt_model_cfg.get("local_dir") or model_cfg.get("local_dir") or "")
     if not model_dir:
         raise ValueError(f"Missing local_dir for model {args.model_key!r} in plan and runtime config")
@@ -644,6 +753,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep_pen = float(inf_cfg["repetition_penalty"])
     qwen_min_px = int(inf_cfg["qwen_min_pixels"])
     qwen_max_px = int(inf_cfg["qwen_max_pixels"])
+    quant_mode = str(inf_cfg.get("quantization") or "bf16").strip().lower()
+    adapter_path_cfg = inf_cfg.get("adapter_path") or rt_model_cfg.get("adapter_path")
+    adapter_id_cfg = str(inf_cfg.get("adapter_id") or rt_model_cfg.get("adapter_id") or ("none" if not adapter_path_cfg else pathlib.Path(str(adapter_path_cfg)).name))
+    adapter_sha256: Optional[str] = None
 
     import torch
     import transformers
@@ -688,19 +801,49 @@ def main(argv: Optional[List[str]] = None) -> int:
             "merge_size": int(getattr(img_proc, "merge_size", 2)),
         }
     elif args.model_key == "qwen3":
-        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+        from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
 
         processor = AutoProcessor.from_pretrained(
             model_dir,
             size={"shortest_edge": qwen_min_px, "longest_edge": qwen_max_px},
             local_files_only=True,
         )
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_dir,
-            dtype=torch.bfloat16,
-            attn_implementation=str(rt_model_cfg.get("attn_implementation") or model_cfg.get("attn_implementation") or "sdpa"),
-            local_files_only=True,
-        ).to("cuda:0")
+        attn_impl = str(rt_model_cfg.get("attn_implementation") or model_cfg.get("attn_implementation") or "sdpa")
+        if quant_mode == "nf4":
+            bnb_cfg = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_dir,
+                quantization_config=bnb_cfg,
+                torch_dtype=torch.bfloat16,
+                attn_implementation=attn_impl,
+                device_map={"": "cuda:0"},
+                local_files_only=True,
+            )
+        else:
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_dir,
+                dtype=torch.bfloat16,
+                attn_implementation=attn_impl,
+                local_files_only=True,
+            ).to("cuda:0")
+        if adapter_path_cfg:
+            ad_p = pathlib.Path(str(adapter_path_cfg))
+            if not ad_p.is_dir():
+                raise FileNotFoundError(f"Requested Qwen3 LoRA adapter directory not found: {ad_p}")
+            from peft import PeftModel
+            import hashlib as _hl
+
+            model = PeftModel.from_pretrained(model, str(ad_p), is_trainable=False)
+            w_cand = ad_p / "adapter_model.safetensors"
+            if not w_cand.is_file():
+                w_cand = ad_p / "adapter_model.bin"
+            if w_cand.is_file():
+                adapter_sha256 = _hl.sha256(w_cand.read_bytes()).hexdigest()
         model.eval()
         eos_ids = [int(x) for x in fics_cfg["eos_token_ids_by_model"]["qwen3"]]
         bos_id = None
@@ -713,6 +856,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "size": dict(img_proc.size),
             "patch_size": int(getattr(img_proc, "patch_size", 16)),
             "merge_size": int(getattr(img_proc, "merge_size", 2)),
+            "quantization": quant_mode,
+            "adapter_path": str(adapter_path_cfg) if adapter_path_cfg else None,
+            "adapter_id": adapter_id_cfg,
+            "adapter_sha256": adapter_sha256,
         }
     else:
         from deepseek_vl.models import MultiModalityCausalLM, VLChatProcessor
@@ -749,17 +896,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         "model_key": args.model_key,
         "load_seconds": load_seconds,
         "actual_model_path": model_dir,
+        "quantization": quant_mode,
+        "adapter_path": str(adapter_path_cfg) if adapter_path_cfg else None,
+        "adapter_id": adapter_id_cfg,
+        "adapter_sha256": adapter_sha256,
         "transformers_version": transformers.__version__,
         "torch_version": torch.__version__,
         "cuda_allocated_mib": alloc_mib,
         "cuda_reserved_mib": res_mib,
         "cleaned_runtime_generation_config": {
             "do_sample": False,
+            "explicit_do_sample_false_kwarg": default_explicit_do_sample_false,
             "repetition_penalty": rep_pen,
             "max_new_tokens": max_new_tokens,
             "eos_token_id": list(eos_ids),
             "bos_token_id": bos_id,
             "pad_token_id": pad_id,
+            "coordinate_protocol": default_coord_protocol,
+            "expected_prompt_sha256": expected_prompt_sha256,
         },
         "processor_meta": proc_meta,
     }, ensure_ascii=False) + "\n")
@@ -804,10 +958,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             model_repo_id=str(rt_model_cfg.get("repo_id") or model_cfg["repo_id"]),
             model_revision=rt_model_cfg.get("revision", model_cfg.get("revision")),
             expected_prompt_sha256=expected_prompt_sha256,
+            default_coord_protocol=default_coord_protocol,
+            default_explicit_do_sample_false=default_explicit_do_sample_false,
+            allowed_prompt_sha256s=allowed_prompt_sha256s,
             emit_stage=emit_stage,
             path_remaps=path_remaps,
             image_hash_index=image_hash_index,
         )
+        rec["quantization"] = quant_mode
+        rec["adapter_id"] = adapter_id_cfg
+        rec["adapter_sha256"] = adapter_sha256
         ipc_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
         ipc_out.flush()
 

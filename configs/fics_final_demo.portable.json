@@ -1,0 +1,12 @@
+{
+  "schema_version": "fics_final_demo_config_v1",
+  "config_role": "portable_cpu_candidate_startup_config",
+  "description": "Standalone CPU replay configuration inside final_delivery_package_candidate (uses relative_to='software_dir' so it launches cleanly from ANY working directory without GPU weights or 8K TIFFs). Attach --runtime-config only when deploying on a machine with >=8GB VRAM and local weights.",
+  "relative_to": "software_dir",
+  "workspace_root": "../evidence/demo_s3_readonly_ws",
+  "runtime_config": "",
+  "results_index": "../evidence/ledger/results_index_portable.json",
+  "host": "127.0.0.1",
+  "port": 8792,
+  "allow_port_fallback": true
+}

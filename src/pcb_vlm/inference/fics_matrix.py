@@ -78,6 +78,8 @@ def apply_runtime_overrides(
         if not isinstance(rt_spec, dict):
             continue
         if mkey not in models_map:
+            if mkey in ("yolo11n_fics_r15", "yolo11n_fics_r15_r19_a1_ic_reject"):
+                continue
             raise ValueError(f"Runtime config references unknown model key {mkey!r}.")
         target = models_map[mkey]
         for locked_field in ("repo_id", "revision", "attn_implementation", "visual_budget"):
@@ -128,9 +130,20 @@ def build_formal_calls_for_model(
     else:
         raise ValueError(f"Plan has no formal queue for model {model_key!r}")
 
+    model_cfg = (plan.get("models") or {}).get(model_key) or {}
     inf_cfg = plan["inference_config"]
-    prompt = str(inf_cfg.get("prompt") or load_fics_six_class_config()["protocol"]["prompt"])
-    prompt_sha = str(spec["prompt_sha256"])
+    prompt = str(model_cfg.get("prompt") or inf_cfg.get("prompt") or load_fics_six_class_config()["protocol"]["prompt"])
+    if model_cfg.get("prompt"):
+        from pcb_vlm.evaluation.fics_replay import sha256_text
+
+        prompt_sha = sha256_text(prompt)
+    else:
+        prompt_sha = str(spec["prompt_sha256"])
+    coord_proto = str(model_cfg.get("coordinate_protocol") or inf_cfg.get("coordinate_protocol") or "xyxy_norm1000")
+    explicit_dsf_raw = model_cfg.get("explicit_do_sample_false")
+    if explicit_dsf_raw is None:
+        explicit_dsf_raw = inf_cfg.get("explicit_do_sample_false", False)
+    explicit_dsf_default = bool(explicit_dsf_raw)
 
     calls: List[Dict[str, Any]] = []
     for idx, q in enumerate(raw_q):
@@ -157,6 +170,15 @@ def build_formal_calls_for_model(
             path_remaps=path_remaps,
             image_hash_index=image_hash_index,
         )
+        q_prompt = str(q.get("prompt") or prompt)
+        if q.get("prompt"):
+            from pcb_vlm.evaluation.fics_replay import sha256_text
+
+            q_prompt_sha = sha256_text(q_prompt)
+        else:
+            q_prompt_sha = str(q.get("prompt_sha256") or prompt_sha)
+        q_proto = str(q.get("coordinate_protocol") or coord_proto)
+        q_explicit_dsf = bool(q["explicit_do_sample_false"]) if q.get("explicit_do_sample_false") is not None else explicit_dsf_default
         calls.append({
             "call_index": int(q.get("call_index", idx)),
             "call_id": cid,
@@ -173,8 +195,10 @@ def build_formal_calls_for_model(
             "roi_offset_y": roi_oy,
             "tile_offset_x": tile_ox,
             "tile_offset_y": tile_oy,
-            "prompt": prompt,
-            "prompt_sha256": prompt_sha,
+            "prompt": q_prompt,
+            "prompt_sha256": q_prompt_sha,
+            "coordinate_protocol": q_proto,
+            "explicit_do_sample_false": q_explicit_dsf,
         })
     return calls
 
@@ -357,7 +381,7 @@ def _build_watchdog_fail_rec(
         "tile_offset_y": int(call["tile_offset_y"]),
         "max_new_tokens": int(max_new_tokens),
         "prompt_sha256": call["prompt_sha256"],
-        "coordinate_protocol": "xyxy_norm1000",
+        "coordinate_protocol": str(call.get("coordinate_protocol") or "xyxy_norm1000"),
         "model_key": model_key,
         "model_repo_id": model_cfg.get("repo_id"),
         "model_revision": model_cfg.get("revision"),
