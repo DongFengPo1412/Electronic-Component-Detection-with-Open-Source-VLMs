@@ -35,7 +35,17 @@
 
 ---
 
-## 2. 架构、核心模块与演示闭环
+## 2. 最新本地工作台（R32 收口版）
+
+在原有 8 板研究与无真值演示基础上，工作台已整合为三页签离线本地版本（`检测` / `三模型对比` / `历史结果`）：
+- **日常检测默认（R15）**：采用 FICS-PCB 6 类域适配 `YOLO11n`（`fics_yolo11n_r15`，`640px / 20%` 切片、`conf=0.25`、跨片类内 `NMS=0.50`），支持单类、多类（如「找电阻和电容」）及半边区域查询（CPU 过滤已有预测，0 新增 GPU）与 JSON / 叠框 PNG 导出。
+- **纯 VLM（锁定 R5/R8）**：保留 `Qwen3-VL-2B-Instruct`（`r5_qwen3_greedy_maxpx589824_tile768` 与单类指令 `r8_base`），并在「三模型对比」页同图串行对比 `Qwen3` / `Qwen2` / `DeepSeek`（如实标出截断、格式不合规与运行失败状态）。
+- **严格事后 COCO GT 评分**：支持整图与显式 `eval_scope="partial_windows"` 局部已核窗口评分；对缺失/空/越界/重叠/拼写错误等非法范围定义一律返回 `HTTP 400` 且保留已有合法评分，明确区分预测框数与实际器件标注数，局部窗口评分不生成整板 F1。
+- **回归验证**：`pytest -rs`（含 `FICS_RESULTS_INDEX` 与 `FICS_HELDOUT_ARTIFACT_DIR` 夹具）**279 passed, 0 failed, 0 skipped**。
+
+---
+
+## 3. 架构、核心模块与演示闭环
 
 - 模型架构与实验协议说明：[docs/model_architectures_and_fics_protocol.md](docs/model_architectures_and_fics_protocol.md)
 - 自动汇总结果表（历史 4 板参考）：[docs/fics_results_tables.md](docs/fics_results_tables.md)
